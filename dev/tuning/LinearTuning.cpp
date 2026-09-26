@@ -31,12 +31,13 @@ struct Layout final {
   uint64_t bytes = 0;
 };
 
-// Plans of one K partition outside the Simdgroup tile store
-// bitwise-identical outputs for a workload. Any other pair may round
+// Plans of one K partition outside the register-matrix tiles (Simdgroup,
+// SimdgroupF32, Mma64) store bitwise-identical outputs for a workload. Any other pair may round
 // differently even with as many K splits on both sides, so it is held to the
 // derived bound.
 bool sequential(const LinearPlan &plan) {
-  return plan.configuration().splits == 1 && !plan.usesSimdgroup();
+  return plan.configuration().splits == 1 && !plan.usesSimdgroup() &&
+         plan.configuration().tile != LinearTile::Mma64;
 }
 bool bitwiseComparable(const LinearPlan &baseline, const LinearPlan &candidate) {
   return sequential(baseline) && sequential(candidate);

@@ -323,7 +323,9 @@ void Linear::addGguf(metal::CommandGraph &graph, const LinearBuffers &b,
   case LinearTile::Paired128:
   case LinearTile::Split128:
   case LinearTile::Paired256:
-  case LinearTile::Simdgroup: break;
+  case LinearTile::Simdgroup:
+  case LinearTile::SimdgroupF32:
+  case LinearTile::Mma64: break;
   }
 }
 

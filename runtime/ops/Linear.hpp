@@ -57,8 +57,14 @@ enum class LinearEpilogue : uint8_t { None, Residual, GateUp, UpWithGate };
 // prefill tile. GgufRegister is the exact register tile on bf16 8x8 matrix
 // operations (Apple9): every request lane in one threadgroup, optional K
 // splits.
+// SimdgroupF32 is Simdgroup's form for GPUs without bfloat arithmetic
+// (Apple7/8: exact half q x fp32 x products), with one threadgroup for every
+// lane of a batch. Mma64 is the four-simdgroup register-matrix prefill tile
+// (64 columns, exact half q x fp32 x products) for GPUs whose MPP path is
+// slow (Apple7/8).
 enum class LinearTile : uint8_t {
-  N128, N256, Paired128, Split128, Paired256, Simdgroup, GgufStaged, GgufPrefill, GgufRegister
+  N128, N256, Paired128, Split128, Paired256, Simdgroup, GgufStaged, GgufPrefill, GgufRegister,
+  SimdgroupF32, Mma64
 };
 // The decode tiles hold at most a full decode batch; GGUF prefill chunks of up
 // to this many rows run the staged tile (Linear::ggufBaseline).
@@ -169,6 +175,13 @@ public:
   [[nodiscard]] uint32_t groups() const noexcept;
   [[nodiscard]] uint32_t threadsPerThreadgroup() const noexcept;
   [[nodiscard]] bool usesSimdgroup() const noexcept;
+  // Register-matrix tiles (Simdgroup, SimdgroupF32, Mma64) reassociate the
+  // fp32 sum within each quantization group.
+  [[nodiscard]] bool registerMatrix() const noexcept;
+  // Outputs may differ from the sequential tiles within fp32 rounding.
+  [[nodiscard]] bool reassociates() const noexcept {
+    return config_.splits > 1 || registerMatrix();
+  }
   // The layout the producer of this plan's input writes. A rotated
   // projection prepares its table from the rotated rows itself
   // (LinearGguf.cpp), so its producer writes plain rows.
