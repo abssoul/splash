@@ -1,10 +1,19 @@
 > **Unofficial fork: Splash on M1/M2 Macs.**
 > Splash is built by [Inco](https://github.com/incoai/splash): the engine, the models and the draft
 > models are theirs. This fork only adds support for Apple7/8 GPUs (M1, M2), which upstream Splash
-> does not run on: a kernel policy for those GPUs and register-matrix Metal kernels written for them.
+> does not run on: a kernel policy for those GPUs and Metal kernels written for them.
 > This is a community port, not an official Inco release.
 >
-> - **M1/M2:** source in branch [`apple7-m1-kernels`](https://github.com/paperniuk/splash/tree/apple7-m1-kernels).
+> - **M1/M2:** prebuilt releases on [the releases page](https://github.com/paperniuk/splash/releases);
+>   source in branch [`apple7-m1-kernels-1.1`](https://github.com/paperniuk/splash/tree/apple7-m1-kernels-1.1)
+>   (upstream 1.1.0 plus the M1/M2 commits). The 1.0.2 port stays in
+>   [`apple7-m1-kernels`](https://github.com/paperniuk/splash/tree/apple7-m1-kernels).
+> - **On M1/M2 this build runs** Splash packages, the GGUF files upstream 1.1 loads (including
+>   Prism ML's Ternary Bonsai `PQ2_0`) and vision, all on its own Metal kernels.
+> - **Long prompts:** prefill is split into GPU commands of about 5 s each. On M1 a single
+>   full-size prefill command can run for a minute at long context, and macOS aborts it; with the
+>   split, a 7-hour agent session reached 229K tokens of context. `--prefill-mode full` restores
+>   upstream's behaviour.
 > - **M3 and newer:** use official Splash, `brew install incoai/tap/splash`.
 > - **M1/M2 problems:** open an issue here, not upstream.
 >
