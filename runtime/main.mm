@@ -45,6 +45,8 @@ public:
   using std::runtime_error::runtime_error;
 };
 
+constexpr uint32_t kMaximumPrefillBoundMilliseconds = 600'000;
+
 struct NativeArguments final {
   std::filesystem::path modelRoot;
   model::ModelDescriptor model;
@@ -53,6 +55,7 @@ struct NativeArguments final {
   uint64_t maxCacheDiskBytes = 0;
   kv::Format kvFormat = kv::Format::Int8;
   bool boundPrefillCommands = true;
+  uint32_t prefillBoundMilliseconds = 0;
 };
 
 // One observer spans bootstrap and serving. The dispatch queue only records
@@ -123,7 +126,8 @@ void printUsage(std::string_view executable) {
   std::cerr << "usage: " << executable
             << " serve-native TARGET_DIRECTORY DRAFT_DIRECTORY"
                " MAX_CONTEXT|auto MAX_MEMORY_BYTES|auto [MAX_CACHE_DISK_BYTES]"
-               " [--kv-format int8|bf16] [--prefill-mode bounded|full]\n";
+               " [--kv-format int8|bf16] [--prefill-mode bounded|full]"
+               " [--prefill-bound-ms MILLISECONDS]\n";
 }
 
 template <typename T>
@@ -194,6 +198,7 @@ NativeArguments parseArguments(int argc, char **argv) {
   }
   bool kvFormatSeen = false;
   bool prefillModeSeen = false;
+  bool prefillBoundSeen = false;
   for (; next < argc; next += 2) {
     const std::string_view option(argv[next]);
     if (next + 1 == argc)
@@ -209,6 +214,11 @@ NativeArguments parseArguments(int argc, char **argv) {
         throw UsageError("--prefill-mode requires bounded or full");
       result.boundPrefillCommands = value == "bounded";
       prefillModeSeen = true;
+    } else if (option == "--prefill-bound-ms" && !prefillBoundSeen) {
+      if (!parsePositive(value, result.prefillBoundMilliseconds) ||
+          result.prefillBoundMilliseconds > kMaximumPrefillBoundMilliseconds)
+        throw UsageError("--prefill-bound-ms requires 1 to 600000");
+      prefillBoundSeen = true;
     } else {
       throw UsageError("unexpected option " + std::string(option));
     }
@@ -261,7 +271,11 @@ bootstrapConfig(const NativeArguments &arguments) {
   config.resources.maximumCacheDiskBytes = arguments.maxCacheDiskBytes;
   config.resources.kvFormat = arguments.kvFormat;
   config.nativeLoop.engine.maxContext = arguments.maxContext;
-  config.nativeLoop.engine.boundPrefillCommands = arguments.boundPrefillCommands;
+  config.nativeLoop.engine.prefillCommandMilliseconds =
+      !arguments.boundPrefillCommands ? engine::kUnboundedPrefillCommand
+      : arguments.prefillBoundMilliseconds
+          ? static_cast<double>(arguments.prefillBoundMilliseconds)
+          : engine::kDefaultPrefillCommandMilliseconds;
   config.nativeLoop.engineInstanceId = engineInstanceId();
   config.nativeLoop.maskWordsPerToken = maskWordsPerToken;
   config.protocolLimits.maxTokenBatch =

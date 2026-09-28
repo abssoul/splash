@@ -27,8 +27,9 @@ struct EngineConfig final {
   uint32_t maxImagePatches = ops::kMaximumImagePatches;
   double resourceWaitTimeoutMilliseconds = 30000.0;
   // Keep isolated prefill commands short enough that macOS does not abort
-  // them for starving the display; false sends full-budget commands.
-  bool boundPrefillCommands = true;
+  // them for starving the display; kUnboundedPrefillCommand sends
+  // full-budget commands.
+  double prefillCommandMilliseconds = kDefaultPrefillCommandMilliseconds;
   // Host growth admission, supplied by the runtime governor. Queried only on
   // failed allocation and, after a suspension the pause caused, while
   // resident lanes drain; never on the ordinary decode path.

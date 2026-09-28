@@ -1870,6 +1870,26 @@ def _parse_request_size(value):
     return size
 
 
+PREFILL_BOUND_DEFAULT_MS = 2000
+PREFILL_BOUND_MAX_MS = 600_000
+# After macOS aborts a prefill command for stalling the display, each restart
+# halves the bound down to this floor, the contended-prefill bound.
+PREFILL_BOUND_FLOOR_MS = 500
+DISPLAY_STALL_ABORT = "ImpactingInteractivity"
+
+
+def _parse_prefill_bound(value):
+    try:
+        result = int(value)
+    except ValueError:
+        result = 0
+    if not 1 <= result <= PREFILL_BOUND_MAX_MS:
+        raise argparse.ArgumentTypeError(
+            f"must be milliseconds from 1 to {PREFILL_BOUND_MAX_MS}"
+        )
+    return result
+
+
 def _parse_model_id(value):
     repo_id, separator, variant = value.partition(":")
     if repo_id.count("/") != 1:
@@ -1925,6 +1945,15 @@ def parse_args(argv=None):
         "whole 2048-token chunks as before",
     )
     parser.add_argument(
+        "--prefill-bound-ms",
+        type=_parse_prefill_bound,
+        default=os.environ.get("SPLASH_PREFILL_BOUND_MS", PREFILL_BOUND_DEFAULT_MS),
+        help="longest bounded prefill GPU command in milliseconds (default: "
+        f"SPLASH_PREFILL_BOUND_MS or {PREFILL_BOUND_DEFAULT_MS}); halved after "
+        "each macOS display-stall abort, down to "
+        f"{PREFILL_BOUND_FLOOR_MS}",
+    )
+    parser.add_argument(
         "--max-request-size",
         type=_parse_request_size,
         default=DEFAULT_MAX_REQUEST_BYTES,
@@ -1976,7 +2005,9 @@ def parse_args(argv=None):
     return args
 
 
-def _native_command(args):
+def _native_command(args, prefill_bound_ms=None):
+    if prefill_bound_ms is None:
+        prefill_bound_ms = args.prefill_bound_ms
     command = [
         args.binary,
         "serve-native",
@@ -1991,7 +2022,33 @@ def _native_command(args):
         command.extend(("--kv-format", args.kv_format))
     if args.prefill_mode != "bounded":
         command.extend(("--prefill-mode", args.prefill_mode))
+    elif prefill_bound_ms != PREFILL_BOUND_DEFAULT_MS:
+        command.extend(("--prefill-bound-ms", str(prefill_bound_ms)))
     return command
+
+
+def _shorter_prefill_after_display_stall(args):
+    """Relaunch command policy: macOS aborts a GPU command that holds the
+    GPU while the display needs it, and how long it tolerates depends on
+    display load. Each such abort halves the bound for the next engine."""
+    bound = args.prefill_bound_ms
+
+    def command_after_failure(failure):
+        nonlocal bound
+        if (
+            args.prefill_mode != "bounded"
+            or DISPLAY_STALL_ABORT not in str(failure)
+            or bound <= PREFILL_BOUND_FLOOR_MS
+        ):
+            return None
+        bound = max(PREFILL_BOUND_FLOOR_MS, bound // 2)
+        print_status(
+            f"Prefill bound · {bound} ms after a macOS display-stall abort",
+            error=True,
+        )
+        return _native_command(args, prefill_bound_ms=bound)
+
+    return command_after_failure
 
 
 def _interrupt(_signum, _frame):
@@ -2037,6 +2094,7 @@ def main():
             pending_limit=args.queue_size,
             eager_start=False,
         )
+        runtime.command_after_failure = _shorter_prefill_after_display_stall(args)
         backend = NativeBackend(
             runtime,
             tokenizer,

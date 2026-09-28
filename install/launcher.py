@@ -239,6 +239,8 @@ def serve(args):
             command.extend(("--kv-format", args.kv_format))
         if args.prefill_mode != "bounded":
             command.extend(("--prefill-mode", args.prefill_mode))
+        if args.prefill_bound_ms is not None:
+            command.extend(("--prefill-bound-ms", str(args.prefill_bound_ms)))
         for name in args.served_model_name:
             command.append(f"--served-model-name={name}")
         if args.default_reasoning_effort is not None:
@@ -375,6 +377,16 @@ def _parse_request_size(value):
     if size is None:
         raise argparse.ArgumentTypeError("use a positive byte count such as 128M")
     return size
+
+
+def _parse_prefill_bound(value):
+    try:
+        result = int(value)
+    except ValueError:
+        result = 0
+    if not 1 <= result <= 600_000:
+        raise argparse.ArgumentTypeError("use milliseconds from 1 to 600000")
+    return result
 
 
 def _parse_max_context(value):
@@ -521,6 +533,13 @@ def parse_args(argv=None):
         help="bounded (default) keeps each prefill GPU command within a few "
         "seconds so macOS does not abort long-context prefill; full sends "
         "whole 2048-token chunks as before",
+    )
+    server.add_argument(
+        "--prefill-bound-ms",
+        type=_parse_prefill_bound,
+        help="longest bounded prefill GPU command in milliseconds (default: "
+        "SPLASH_PREFILL_BOUND_MS or 2000); halved after each macOS "
+        "display-stall abort",
     )
     server.add_argument(
         "--max-memory",

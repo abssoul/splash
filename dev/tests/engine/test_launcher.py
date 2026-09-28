@@ -63,6 +63,18 @@ class LauncherTests(unittest.TestCase):
         )
         with mock.patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
             launcher.parse_args(base + ["--prefill-mode", "fast"])
+        self.assertIsNone(launcher.parse_args(base).prefill_bound_ms)
+        self.assertEqual(
+            launcher.parse_args(base + ["--prefill-bound-ms", "3000"]).prefill_bound_ms,
+            3000,
+        )
+        for invalid in ("0", "2s", "600001"):
+            with (
+                self.subTest(invalid=invalid),
+                mock.patch("sys.stderr", io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                launcher.parse_args(base + ["--prefill-bound-ms", invalid])
 
     def test_serve_requires_exact_repository_id_before_build(self):
         for arguments in (
@@ -254,6 +266,7 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(argv[argv.index("--model") + 1], MODEL_ID)
                 self.assertEqual(argv[argv.index("--kv-format") + 1], "bf16")
                 self.assertEqual(argv[argv.index("--prefill-mode") + 1], "full")
+                self.assertEqual(argv[argv.index("--prefill-bound-ms") + 1], "3000")
                 self.assertEqual(
                     argv[argv.index("--max-request-size") + 1], str(256 * 1024**2)
                 )
@@ -298,6 +311,8 @@ class LauncherTests(unittest.TestCase):
                         "bf16",
                         "--prefill-mode",
                         "full",
+                        "--prefill-bound-ms",
+                        "3000",
                         "--api-key",
                         "test-server-key",
                         "--no-webui",
