@@ -58,6 +58,9 @@ struct SchedulerSnapshot final {
   uint32_t terminal = 0;
   uint64_t prefillBatches = 0;
   uint64_t prefillRows = 0;
+  // The isolated prefill command bound in effect; a restart after a
+  // display-stall abort lowers it. kUnboundedPrefillCommand reports as null.
+  double prefillBoundMilliseconds = kDefaultPrefillCommandMilliseconds;
   uint64_t decodeBatches = 0;
   std::array<uint64_t, model::ExecutionLimits::maximumBatchWidth>
       decodeBatchesByWidth{};

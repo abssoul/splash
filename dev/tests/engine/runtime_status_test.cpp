@@ -254,13 +254,20 @@ void testCleanRuntimeStatus() {
               std::string::npos,
           "status lost the mixed greedy/sampling decode count");
   auto idleEngine = engine;
+  require(json.find("\"prefill_rows\":4096,\"prefill_bound_ms\":2000,") !=
+              std::string::npos,
+          "status omitted the effective prefill command bound");
   idleEngine.scheduler = {};
+  idleEngine.scheduler.prefillBoundMilliseconds =
+      engine::kUnboundedPrefillCommand;
   const auto idleJson = runtimeStatusJson(
       memoryPlan, idleEngine, metal, warmup, audit(memoryPlan), metrics,
       executorTelemetry, identity, governor, true);
   require(idleJson.find("\"decode_mixed_greedy_sampling_batches\":0}") !=
               std::string::npos,
           "status omitted the zero mixed decode count");
+  require(idleJson.find("\"prefill_bound_ms\":null,") != std::string::npos,
+          "status did not report an unbounded prefill command as null");
   require(
       json.find("\"dynamic_budget_bytes\"") != std::string::npos &&
           json.find("\"resource_replay_tokens\":1234") != std::string::npos &&

@@ -511,6 +511,7 @@ uint32_t Scheduler::promptProcessed(uint64_t id) const {
 
 SchedulerSnapshot Scheduler::snapshot() const noexcept {
   SchedulerSnapshot result = counters_;
+  result.prefillBoundMilliseconds = isolatedPrefillMilliseconds_;
   for (const auto &[_, request] : requests_) {
     switch (request.phase) {
     case Phase::Queued:

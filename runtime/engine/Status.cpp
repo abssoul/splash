@@ -6,6 +6,7 @@
 #include "metal/abi/ExecutionGeometry.h"
 
 #include <algorithm>
+#include <cmath>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -271,7 +272,12 @@ std::string runtimeStatusJson(
       << ",\"terminal\":" << scheduler.terminal
       << ",\"prefill_batches\":" << scheduler.prefillBatches
       << ",\"prefill_rows\":" << scheduler.prefillRows
-      << ",\"decode_batches\":" << scheduler.decodeBatches
+      << ",\"prefill_bound_ms\":";
+  if (std::isfinite(scheduler.prefillBoundMilliseconds))
+    out << scheduler.prefillBoundMilliseconds;
+  else
+    out << "null";
+  out << ",\"decode_batches\":" << scheduler.decodeBatches
       << ",\"decode_batches_by_width\":{\"b1\":"
       << scheduler.decodeBatchesByWidth[0]
       << ",\"b2\":" << scheduler.decodeBatchesByWidth[1]

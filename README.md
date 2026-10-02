@@ -182,7 +182,8 @@ that a long uncached prompt will reach its first token quickly.
 - `--prefill-bound-ms`: the longest bounded prefill command, in milliseconds.
   Default: `SPLASH_PREFILL_BOUND_MS` or 2000. If macOS still aborts a command
   (`ImpactingInteractivity`), the restarted engine uses half the bound, down
-  to 500.
+  to 500. `/status` reports the bound in effect as
+  `scheduler.prefill_bound_ms` (`null` with `--prefill-mode full`).
 - `--max-image-pixels`: maximum resized pixels per image. Default: 4,194,304.
 - `--allowed-host`: extra HTTP `Host` name to accept, such as `mymac.local`;
   not a bind address. Repeatable.

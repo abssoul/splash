@@ -538,6 +538,8 @@ void testConfiguredPrefillBoundSetsCommandLength() {
         std::pair{engine::kDefaultPrefillCommandMilliseconds, 64u}}) {
     engine::Scheduler scheduler;
     scheduler.boundIsolatedPrefill(bound);
+    require(scheduler.snapshot().prefillBoundMilliseconds == bound,
+            "snapshot did not report the configured prefill bound");
     scheduler.submit(request(1, 200'000));
     scheduler.resourcesReady(1, 0);
     completePrefill(scheduler, *scheduler.next(), 2048 * 32.0);
