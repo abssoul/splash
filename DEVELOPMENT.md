@@ -9,7 +9,7 @@ using that SDK. Packaged users need none of these development tools.
 ## Build and run
 
 ```sh
-git clone https://github.com/incoai/splash.git
+git clone https://github.com/paperniuk/splash.git
 cd splash
 make -j4
 ./splash serve --model mlx-community/Qwen3.8-27B-4bit
