@@ -99,6 +99,12 @@ struct AttentionWorkspace final {
   uint64_t statisticsBytes = 0;
 };
 
+// Mpp is the shipped tensor-operation tile. Register is the Apple7/8 tile
+// (exact half INT8 or exact fp32 BF16 cache, fp32 queries and probabilities,
+// one simdgroup per eight fused rows) for prefill and verify. The device
+// policy (ExecutionPlans) selects it.
+enum class AttentionTile : uint8_t { Mpp = 0, Register = 1 };
+
 // Immutable factory-built plans are shared by allocation, measurement and
 // encoding. Each prefill uses one split dispatch followed by one reduction.
 // Callers cannot replace a dispatch or reduce its scratch bound.
@@ -110,18 +116,19 @@ struct PrefillAttentionPlan final {
   const std::string_view splitPipeline;
   const std::string_view reducePipeline;
   const metal::DispatchSize splitGroups;
+  const metal::DispatchSize splitThreads;
   const metal::DispatchSize reduceGroups;
 
 private:
   friend class PagedAttention;
   PrefillAttentionPlan(uint32_t rows, uint32_t splits, AttentionWorkspace workspace,
                        std::string_view splitPipeline, std::string_view reducePipeline,
-                       metal::DispatchSize splitGroups, metal::DispatchSize reduceGroups,
-                       kv::Format format)
+                       metal::DispatchSize splitGroups, metal::DispatchSize splitThreads,
+                       metal::DispatchSize reduceGroups, kv::Format format)
       : format(format), rows(rows),
         splits(splits), workspace(workspace),
         splitPipeline(splitPipeline), reducePipeline(reducePipeline),
-        splitGroups(splitGroups), reduceGroups(reduceGroups) {}
+        splitGroups(splitGroups), splitThreads(splitThreads), reduceGroups(reduceGroups) {}
 };
 
 struct VerifyAttentionPlan final {
@@ -136,6 +143,7 @@ struct VerifyAttentionPlan final {
   const std::string_view splitPipeline;
   const std::string_view reducePipeline;
   const metal::DispatchSize splitGroups;
+  const metal::DispatchSize splitThreads;
   const metal::DispatchSize reduceGroups;
 
 private:
@@ -147,13 +155,14 @@ private:
                       std::array<uint32_t, SPLASH_MAXIMUM_BATCH_WIDTH> laneSplits,
                       uint32_t splits, AttentionWorkspace workspace,
                       std::string_view splitPipeline, std::string_view reducePipeline,
-                      metal::DispatchSize splitGroups, metal::DispatchSize reduceGroups,
+                      metal::DispatchSize splitGroups, metal::DispatchSize splitThreads,
+                      metal::DispatchSize reduceGroups,
                       std::string_view storePipeline, metal::DispatchSize storeGroups,
                       metal::DispatchSize storeThreads, kv::Format format)
       : format(format), lanes(lanes), laneSplits(laneSplits),
         splits(splits), workspace(workspace),
         splitPipeline(splitPipeline), reducePipeline(reducePipeline),
-        splitGroups(splitGroups), reduceGroups(reduceGroups),
+        splitGroups(splitGroups), splitThreads(splitThreads), reduceGroups(reduceGroups),
         storePipeline_(storePipeline), storeGroups_(storeGroups), storeThreads_(storeThreads) {}
 };
 
@@ -175,12 +184,14 @@ public:
   // The kernels read a sequence's history from its chunk parameters, so a
   // plan depends on the rows only.
   [[nodiscard]] static PrefillAttentionPlan
-  prefillPlan(uint32_t rows, uint32_t queryHeads, kv::Layout layout);
+  prefillPlan(uint32_t rows, uint32_t queryHeads, kv::Layout layout,
+              AttentionTile tile = AttentionTile::Mpp);
   // historyTokens holds each lane's committed tokens before its verify rows,
   // one entry per lane.
   [[nodiscard]] static VerifyAttentionPlan
   verifyPlan(uint32_t lanes, uint32_t queryHeads, kv::Layout layout,
-             std::span<const uint32_t> historyTokens);
+             std::span<const uint32_t> historyTokens,
+             AttentionTile tile = AttentionTile::Mpp);
 
   // The runtime owns allocation, not the selected kernel's workspace layout.
   // Prefill storage covers every sequence length up to maximumRows; sequences

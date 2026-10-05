@@ -1,3 +1,4 @@
+#include "metal/kernels/common/paged_attention_sgf.h"
 #include "metal/kernels/common/paged_attention_tile.h"
 
 // Prefill runs the shared device-operand page loop
@@ -91,6 +92,45 @@ PAGED_PREFILL_SPLIT(prefill_attention_q8_split_kv2_g8, 2, 8, int8_t)
 PAGED_PREFILL_SPLIT(prefill_attention_bf16_split, 4, 6, bfloat)
 PAGED_PREFILL_SPLIT(prefill_attention_bf16_split_kv2_g8, 2, 8, bfloat)
 #undef PAGED_PREFILL_SPLIT
+
+// Apple7/8 register tile (paged_attention_sgf.h): the bindings and grid of
+// the split above with 32 x G threads, one simdgroup per eight fused rows.
+// Slots, partials and statistics are the MPP tile's, so the reduce below
+// combines them unchanged.
+#define SGF_PREFILL_SPLIT(Name, Heads, Group, CacheElement)                    \
+  kernel void Name(                                                            \
+      device bfloat *queries [[buffer(0)]],                                    \
+      device float *partials [[buffer(1)]],                                    \
+      device float *statistics [[buffer(2)]],                                  \
+      device const SplashKvPage *page_table [[buffer(3)]],                     \
+      constant SplashPrefillAttentionParams &params [[buffer(4)]],             \
+      uint3 group [[threadgroup_position_in_grid]],                            \
+      uint sg [[simdgroup_index_in_threadgroup]],                              \
+      uint lane [[thread_index_in_simdgroup]]) {                               \
+    constexpr uint D = SplashKvHeadDimension;                                  \
+    const uint kv_head = group.x, tile = group.y, split = group.z;             \
+    const uint tile_start = tile * SplashPrefillTileRows;                      \
+    if (!splash_prefill_attention_contract_valid(params) ||                    \
+        kv_head >= Heads || split >= params.split_count ||                     \
+        tile_start >= params.rows || sg >= Group)                              \
+      return;                                                                  \
+    const uint active_rows =                                                   \
+        min(SplashPrefillTileRows, params.rows - tile_start);                  \
+    const ulong tile_offset =                                                  \
+        (ulong(kv_head) * params.chunk_stride + tile_start) * Group * D;       \
+    const ulong slot =                                                         \
+        (ulong(tile) * Heads + kv_head) * params.split_count + split;          \
+    q8sgf::tile<Heads, Group, CacheElement>(                                   \
+        queries + tile_offset, page_table, params.kv, kv_head,                 \
+        params.committed_tokens + tile_start, active_rows, params.split_count, \
+        split, partials, statistics, slot, sg, lane);                          \
+  }
+
+SGF_PREFILL_SPLIT(prefill_attention_q8_split_sgf, 4, 6, int8_t)
+SGF_PREFILL_SPLIT(prefill_attention_q8_split_sgf_kv2_g8, 2, 8, int8_t)
+SGF_PREFILL_SPLIT(prefill_attention_bf16_split_sgf, 4, 6, bfloat)
+SGF_PREFILL_SPLIT(prefill_attention_bf16_split_sgf_kv2_g8, 2, 8, bfloat)
+#undef SGF_PREFILL_SPLIT
 
 kernel void prefill_attention_reduce(
     device const float *partials [[buffer(0)]],

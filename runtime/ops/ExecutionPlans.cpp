@@ -26,17 +26,20 @@ void include(Workspace &bound, const Workspace &required,
 ExecutionPlans::ExecutionPlans(const DeviceCapabilities &device)
     : linear_(device), moeRouteWideRows_(moeRouteWideRows(plannedGpuCores(device))),
       moeDecodeSimdgroups_(moeDecodeSimdgroups(device.appleGpuFamily)),
-      appleGpuFamily_(device.appleGpuFamily) {}
+      appleGpuFamily_(device.appleGpuFamily),
+      // Apple7/8 have no bfloat arithmetic; their prefill and verify attention
+      // run the register tile.
+      attentionTile_(device.appleGpuFamily < 9 ? AttentionTile::Register : AttentionTile::Mpp) {}
 
 PrefillAttentionPlan ExecutionPlans::prefillAttention(
     uint32_t rows, uint32_t queryHeads, kv::Layout layout) const {
-  return PagedAttention::prefillPlan(rows, queryHeads, layout);
+  return PagedAttention::prefillPlan(rows, queryHeads, layout, attentionTile_);
 }
 
 VerifyAttentionPlan ExecutionPlans::verifyAttention(
     uint32_t lanes, uint32_t queryHeads, kv::Layout layout,
     std::span<const uint32_t> historyTokens) const {
-  return PagedAttention::verifyPlan(lanes, queryHeads, layout, historyTokens);
+  return PagedAttention::verifyPlan(lanes, queryHeads, layout, historyTokens, attentionTile_);
 }
 
 DraftAttentionPlan ExecutionPlans::draftAttention(DraftAttentionShape shape,

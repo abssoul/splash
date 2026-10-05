@@ -74,10 +74,19 @@ uint32_t prefillSplits(uint32_t tiles) {
   return std::clamp(maximum / tiles, 1U, maximum);
 }
 
+// The register tile runs one simdgroup per eight fused rows of the GQA group.
+metal::DispatchSize splitThreads(AttentionTile tile, uint32_t queryHeads, kv::Layout layout) {
+  if (tile != AttentionTile::Mpp && tile != AttentionTile::Register)
+    throw std::invalid_argument("invalid attention tile");
+  return {tile == AttentionTile::Register ? uint64_t{32} * (queryHeads / layout.kvHeads)
+                                          : metal::CommandGraph::kDefaultThreads,
+          1, 1};
+}
+
 } // namespace
 
 PrefillAttentionPlan PagedAttention::prefillPlan(
-    uint32_t rows, uint32_t queryHeads, kv::Layout layout) {
+    uint32_t rows, uint32_t queryHeads, kv::Layout layout, AttentionTile tile) {
   const KernelLayout kernel = attentionKernelLayout(queryHeads, layout);
   if (!rows || rows > kv::kChunkedPrefillMaximumRows)
     throw std::invalid_argument("invalid attention workspace rows");
@@ -85,22 +94,29 @@ PrefillAttentionPlan PagedAttention::prefillPlan(
   const uint32_t splits = prefillSplits(tiles);
   const uint32_t fusedRows =
       kv::kPrefillAttentionTileRows * (queryHeads / layout.kvHeads);
+  const bool bf16 = layout.format == kv::Format::BFloat16;
+  const bool registerTile = tile == AttentionTile::Register;
   return {rows, splits,
           attentionWorkspace(uint64_t{tiles} * splits * layout.kvHeads * fusedRows,
                              layout.headDimension),
-          layout.format == kv::Format::BFloat16
-              ? pipeline(kernel, "prefill_attention_bf16_split",
-                         "prefill_attention_bf16_split_kv2_g8")
-              : pipeline(kernel, "prefill_attention_q8_split",
-                         "prefill_attention_q8_split_kv2_g8"),
+          registerTile
+              ? bf16 ? pipeline(kernel, "prefill_attention_bf16_split_sgf",
+                                "prefill_attention_bf16_split_sgf_kv2_g8")
+                     : pipeline(kernel, "prefill_attention_q8_split_sgf",
+                                "prefill_attention_q8_split_sgf_kv2_g8")
+          : bf16 ? pipeline(kernel, "prefill_attention_bf16_split",
+                            "prefill_attention_bf16_split_kv2_g8")
+                 : pipeline(kernel, "prefill_attention_q8_split",
+                            "prefill_attention_q8_split_kv2_g8"),
           pipeline(kernel, "prefill_attention_reduce",
                    "prefill_attention_reduce_kv2_g8"),
-          {layout.kvHeads, tiles, splits}, {layout.kvHeads, fusedRows, tiles}, layout.format};
+          {layout.kvHeads, tiles, splits}, splitThreads(tile, queryHeads, layout),
+          {layout.kvHeads, fusedRows, tiles}, layout.format};
 }
 
 VerifyAttentionPlan PagedAttention::verifyPlan(
     uint32_t lanes, uint32_t queryHeads, kv::Layout layout,
-    std::span<const uint32_t> historyTokens) {
+    std::span<const uint32_t> historyTokens, AttentionTile tile) {
   const KernelLayout kernel = attentionKernelLayout(queryHeads, layout);
   if (!lanes || lanes > SPLASH_MAXIMUM_BATCH_WIDTH)
     throw std::invalid_argument("invalid attention workspace batch width");
@@ -116,16 +132,22 @@ VerifyAttentionPlan PagedAttention::verifyPlan(
     laneSplits[lane] = kv::verifyAttentionSplits(historyTokens[lane]);
     splits = std::max(splits, laneSplits[lane]);
   }
+  const bool bf16 = layout.format == kv::Format::BFloat16;
+  const bool registerTile = tile == AttentionTile::Register;
   return {lanes, laneSplits, splits,
           verifyWorkspaceBound(lanes, queryHeads, layout),
-          layout.format == kv::Format::BFloat16
-              ? pipeline(kernel, "verify_attention_bf16_split",
-                         "verify_attention_bf16_split_kv2_g8")
-              : pipeline(kernel, "verify_attention_q8_split",
-                         "verify_attention_q8_split_kv2_g8"),
+          registerTile
+              ? bf16 ? pipeline(kernel, "verify_attention_bf16_split_sgf",
+                                "verify_attention_bf16_split_sgf_kv2_g8")
+                     : pipeline(kernel, "verify_attention_q8_split_sgf",
+                                "verify_attention_q8_split_sgf_kv2_g8")
+          : bf16 ? pipeline(kernel, "verify_attention_bf16_split",
+                            "verify_attention_bf16_split_kv2_g8")
+                 : pipeline(kernel, "verify_attention_q8_split",
+                            "verify_attention_q8_split_kv2_g8"),
           pipeline(kernel, "verify_attention_reduce",
                    "verify_attention_reduce_kv2_g8"),
-          {layout.kvHeads, splits, lanes},
+          {layout.kvHeads, splits, lanes}, splitThreads(tile, queryHeads, layout),
           {layout.kvHeads,
            kv::kVerifyRows * (queryHeads / layout.kvHeads), lanes},
           layout.format == kv::Format::BFloat16
@@ -298,7 +320,7 @@ void PagedAttention::addPrefill(
       chunk.page_table_entries, layer, plan.splits};
   graph.add(std::string(plan.splitPipeline),
             {std::move(queries), partials, statistics, std::move(pageTable)},
-            params, plan.splitGroups);
+            params, plan.splitGroups, plan.splitThreads);
   graph.add(std::string(plan.reducePipeline),
             {std::move(partials), std::move(statistics), std::move(output)},
             params, plan.reduceGroups);
@@ -337,7 +359,7 @@ void PagedAttention::addVerify(metal::CommandGraph &graph, SplashKvLayer layer,
   graph.add(std::string(plan.splitPipeline),
             {buffers.queries, buffers.partials, buffers.statistics, tables[0],
              tables[1], tables[2], tables[3]},
-            attention, plan.splitGroups);
+            attention, plan.splitGroups, plan.splitThreads);
   graph.add(std::string(plan.reducePipeline),
             {buffers.partials, buffers.statistics, buffers.output},
             attention, plan.reduceGroups);

@@ -49,6 +49,7 @@ private:
   uint32_t moeRouteWideRows_;
   MoeExpertSimdgroups moeDecodeSimdgroups_ = MoeExpertSimdgroups::Eight;
   uint32_t appleGpuFamily_ = 0;
+  AttentionTile attentionTile_ = AttentionTile::Mpp;
 };
 
 } // namespace splash::ops

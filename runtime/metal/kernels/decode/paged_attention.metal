@@ -1,3 +1,4 @@
+#include "metal/kernels/common/paged_attention_sgf.h"
 #include "metal/kernels/common/paged_attention_tile.h"
 
 // Verify tiles process one lane's eight rows per KV head and history split.
@@ -103,6 +104,39 @@ PAGED_VERIFY_SPLIT(verify_attention_q8_split_kv2_g8, 2, 8, int8_t)
 PAGED_VERIFY_SPLIT(verify_attention_bf16_split, 4, 6, bfloat)
 PAGED_VERIFY_SPLIT(verify_attention_bf16_split_kv2_g8, 2, 8, bfloat)
 #undef PAGED_VERIFY_SPLIT
+
+// Apple7/8 register tile (paged_attention_sgf.h): the bindings and grid of
+// the split above with 32 x G threads, one simdgroup per eight fused rows.
+#define SGF_VERIFY_SPLIT(Name, Heads, Group, CacheElement)                     \
+  kernel void Name(                                                            \
+      device bfloat *queries [[buffer(0)]],                                    \
+      device float *partials [[buffer(1)]],                                    \
+      device float *statistics [[buffer(2)]],                                  \
+      device const SplashKvPage *page_table0 [[buffer(3)]],                    \
+      device const SplashKvPage *page_table1 [[buffer(4)]],                    \
+      device const SplashKvPage *page_table2 [[buffer(5)]],                    \
+      device const SplashKvPage *page_table3 [[buffer(6)]],                    \
+      constant SplashVerifyAttentionParams *params [[buffer(7)]],              \
+      uint3 group [[threadgroup_position_in_grid]],                            \
+      uint sg [[simdgroup_index_in_threadgroup]],                              \
+      uint lane [[thread_index_in_simdgroup]]) {                               \
+    const SplashVerifyTile tile =                                              \
+        splash_verify_attention_tile_at<Heads, Group>(                         \
+            queries, page_table0, page_table1, page_table2, page_table3,       \
+            params, group);                                                    \
+    if (!tile.active || sg >= Group)                                           \
+      return;                                                                  \
+    q8sgf::tile<Heads, Group, CacheElement>(                                   \
+        tile.queries, tile.page_table, params[group.z].kv, tile.kv_head,       \
+        tile.committed_tokens, SPLASH_TARGET_VERIFY_ROWS, tile.splits,         \
+        tile.split, partials, statistics, tile.slot, sg, lane);                \
+  }
+
+SGF_VERIFY_SPLIT(verify_attention_q8_split_sgf, 4, 6, int8_t)
+SGF_VERIFY_SPLIT(verify_attention_q8_split_sgf_kv2_g8, 2, 8, int8_t)
+SGF_VERIFY_SPLIT(verify_attention_bf16_split_sgf, 4, 6, bfloat)
+SGF_VERIFY_SPLIT(verify_attention_bf16_split_sgf_kv2_g8, 2, 8, bfloat)
+#undef SGF_VERIFY_SPLIT
 #undef PAGED_VERIFY_TILE_AT
 #undef PAGED_VERIFY_SCRATCH
 #undef PAGED_VERIFY_SPLIT_SIGNATURE
