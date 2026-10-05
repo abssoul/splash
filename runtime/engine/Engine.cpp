@@ -76,6 +76,7 @@ Engine::Engine(EngineConfig config, Cache &cache, model::Model &model,
   }
   if (!std::isfinite(config_.decodeShare) || config_.decodeShare < 0.0)
     throw std::invalid_argument("decode share must be nonnegative and finite");
+  scheduler_.boundIsolatedPrefill(config_.prefillCommandMilliseconds);
 }
 
 void Engine::submit(EngineRequest value) {

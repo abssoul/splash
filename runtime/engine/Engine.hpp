@@ -42,6 +42,10 @@ struct EngineConfig final {
   // its solo rate through a long prefill, which meanwhile takes 1.5x as long;
   // zero alternates one command of each kind.
   double decodeShare = 0.5;
+  // Keep isolated prefill commands short enough that macOS does not abort
+  // them for starving the display; kUnboundedPrefillCommand sends
+  // full-budget commands.
+  double prefillCommandMilliseconds = kDefaultPrefillCommandMilliseconds;
   // Host growth admission, supplied by the runtime governor. Queried only
   // while resident lanes drain after a suspension; allocation reads the
   // cause of a refusal instead.

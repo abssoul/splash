@@ -120,6 +120,24 @@ def parse_request_timeout(value):
     return seconds
 
 
+# The longest bounded prefill GPU command (runtime/engine/Scheduler.hpp).
+PREFILL_BOUND_DEFAULT_MS = 2000
+PREFILL_BOUND_MAX_MS = 600_000
+
+
+def parse_prefill_bound(value):
+    """Milliseconds from 1 to PREFILL_BOUND_MAX_MS."""
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        result = 0
+    if not 1 <= result <= PREFILL_BOUND_MAX_MS:
+        raise argparse.ArgumentTypeError(
+            f"must be milliseconds from 1 to {PREFILL_BOUND_MAX_MS}"
+        )
+    return result
+
+
 def parse_idle_release(value):
     """--idle-release in seconds, math.inf for off."""
     if value.strip().lower() == "off":
@@ -286,6 +304,28 @@ SERVE_OPTIONS = (
             default="int8",
             help="target KV cache storage (default: int8); bf16 uses more memory",
         ),
+    ),
+    ServeOption(
+        "--prefill-mode",
+        dict(
+            choices=("bounded", "full"),
+            default="bounded",
+            help="bounded (default) keeps each prefill GPU command within a few "
+            "seconds so macOS does not abort long-context prefill; full sends "
+            "whole 2048-token chunks",
+        ),
+    ),
+    ServeOption(
+        "--prefill-bound-ms",
+        dict(
+            type=parse_prefill_bound,
+            default=None,
+            metavar="MILLISECONDS",
+            help="longest bounded prefill GPU command in milliseconds (default: "
+            f"SPLASH_PREFILL_BOUND_MS or {PREFILL_BOUND_DEFAULT_MS}); halved after "
+            "each macOS display-stall abort",
+        ),
+        environment="SPLASH_PREFILL_BOUND_MS",
     ),
     ServeOption(
         "--max-memory",

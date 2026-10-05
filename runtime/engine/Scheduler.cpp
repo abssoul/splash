@@ -22,6 +22,12 @@ bool listed(std::span<const uint64_t> ids, uint64_t id) noexcept {
 
 } // namespace
 
+void Scheduler::boundIsolatedPrefill(double milliseconds) {
+  if (!(milliseconds > 0.0))
+    throw std::invalid_argument("prefill command bound must be positive");
+  isolatedPrefillMilliseconds_ = milliseconds;
+}
+
 void Scheduler::submit(RequestSpec request) {
   Request state;
   state.spec = std::move(request);
@@ -326,10 +332,17 @@ uint32_t Scheduler::prefillBudget(
   const uint32_t maximum = model::ExecutionLimits::prefillTokenBudget;
   if (prefillMillisecondsPerToken_ <= 0.0)
     return maximum;
-  uint32_t rows = maximum;
-  while (rows > kMinimumPrefillRows &&
-         rows * prefillMillisecondsPerToken_ > kContendedPrefillMilliseconds)
-    rows /= 2;
+  const auto boundedRows = [&](double milliseconds) {
+    uint32_t rows = maximum;
+    while (rows > kMinimumPrefillRows &&
+           rows * prefillMillisecondsPerToken_ > milliseconds)
+      rows /= 2;
+    return rows;
+  };
+  const uint32_t isolated = std::isfinite(isolatedPrefillMilliseconds_)
+                                ? boundedRows(isolatedPrefillMilliseconds_)
+                                : maximum;
+  const uint32_t rows = boundedRows(kContendedPrefillMilliseconds);
   const uint32_t leaderRemaining =
       leader.request->spec.prefillTokens - leader.promptProcessed;
   const bool leaderFinishing = leaderRemaining <= rows;
@@ -354,10 +367,11 @@ uint32_t Scheduler::prefillBudget(
   // A leader that finishes within the full budget ends the command at its
   // last row, or at its next state boundary: prefill cost is linear above
   // the slice, so shortest-first sequential commands minimise first-token
-  // latency. Long prefills stay packed only when no lane finishes.
+  // latency. Long prefills stay packed only when no lane finishes. Either
+  // way the command stays within the isolated bound.
   if (leaderRemaining <= maximum)
-    return dispatchRemaining(leader);
-  return maximum;
+    return std::min(dispatchRemaining(leader), isolated);
+  return isolated;
 }
 
 std::optional<BatchPlan> Scheduler::nextDecode(std::span<const uint64_t> excluded) const {
@@ -554,6 +568,7 @@ uint32_t Scheduler::promptProcessed(uint64_t id) const {
 
 SchedulerSnapshot Scheduler::snapshot() const noexcept {
   SchedulerSnapshot result = counters_;
+  result.prefillBoundMilliseconds = isolatedPrefillMilliseconds_;
   for (const auto &[_, request] : requests_) {
     switch (request.phase) {
     case Phase::Queued:

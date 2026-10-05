@@ -91,6 +91,7 @@ window. To set your own limits or cache options, add these to `splash serve`:
 | `--max-context 100K` | Set the context limit. |
 | `--language-only` | Skip vision; serve text only. |
 | `--kv-format bf16` | Use BF16 KV cache. Default: 8-bit (INT8). |
+| `--prefill-bound-ms 1000` | Longest prefill GPU command. Default: 2000 (`SPLASH_PREFILL_BOUND_MS`), so macOS does not abort long-context prefill for stalling the display (`ImpactingInteractivity`); after such an abort the restarted engine halves it, down to 500. `--prefill-mode full` sends whole 2048-token chunks instead. `/status` reports it as `scheduler.prefill_bound_ms`. |
 | `--max-cache-disk 16G` | Offload KV cache and GDN states to SSD as needed. Off by default. |
 | `--persistent-cache` | Keep the SSD cache across restarts. Off by default. |
 

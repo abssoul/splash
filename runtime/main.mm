@@ -67,7 +67,12 @@ struct NativeArguments final {
   // --idle-sleep prevent|allow: whether the engine keeps the Mac from sleeping
   // automatically while it holds a request.
   bool preventIdleSleep = true;
+  // --prefill-mode bounded|full and --prefill-bound-ms: the isolated prefill
+  // command bound (Scheduler.hpp), infinite for full.
+  double prefillCommandMilliseconds = engine::kDefaultPrefillCommandMilliseconds;
 };
+
+constexpr uint32_t kMaximumPrefillBoundMilliseconds = 600'000;
 
 // One observer spans bootstrap and serving. The dispatch queue only records
 // pressure and wakes control; all allocation/reclaim decisions stay on the
@@ -182,7 +187,8 @@ void printUsage(std::string_view executable) {
       " MAX_CONTEXT|auto MAX_MEMORY_BYTES|auto [MAX_CACHE_DISK_BYTES]"
       " [--kv-format int8|bf16] [--decode-share SHARE]"
       " [--max-image-patches PATCHES] [--cache-dir DIRECTORY]"
-      " [--idle-release SECONDS|off] [--idle-sleep prevent|allow]");
+      " [--idle-release SECONDS|off] [--idle-sleep prevent|allow]"
+      " [--prefill-mode bounded|full] [--prefill-bound-ms MILLISECONDS]");
 }
 
 template <typename T>
@@ -271,6 +277,8 @@ NativeArguments parseArguments(int argc, char **argv) {
       throw UsageError("MAX_CACHE_DISK_BYTES must be a nonnegative integer");
   }
   // Options follow as --name value pairs; a missing value fails its check.
+  bool boundPrefill = true;
+  uint32_t prefillBound = 0;
   for (; next < argc; next += 2) {
     const std::string_view option(argv[next]);
     const std::string_view value(next + 1 < argc ? argv[next + 1] : "");
@@ -292,10 +300,20 @@ NativeArguments parseArguments(int argc, char **argv) {
       if (value != "prevent" && value != "allow")
         throw UsageError("--idle-sleep requires prevent or allow");
       result.preventIdleSleep = value == "prevent";
+    } else if (option == "--prefill-mode") {
+      if (value != "bounded" && value != "full")
+        throw UsageError("--prefill-mode requires bounded or full");
+      boundPrefill = value == "bounded";
+    } else if (option == "--prefill-bound-ms") {
+      if (!parsePositive(value, prefillBound) || prefillBound > kMaximumPrefillBoundMilliseconds)
+        throw UsageError("--prefill-bound-ms requires 1 to 600000");
     } else {
       throw UsageError("unexpected argument " + std::string(option));
     }
   }
+  result.prefillCommandMilliseconds = !boundPrefill   ? engine::kUnboundedPrefillCommand
+                                      : prefillBound ? static_cast<double>(prefillBound)
+                                                     : engine::kDefaultPrefillCommandMilliseconds;
   if (!result.persistentCacheRoot.empty() && !result.maxCacheDiskBytes)
     throw UsageError("--cache-dir requires a MAX_CACHE_DISK_BYTES quota");
   result.modelRoot = requireModelRoot(argv[2]);
@@ -339,6 +357,7 @@ bootstrapConfig(const NativeArguments &arguments) {
   config.resources.idleReleaseSeconds = arguments.idleReleaseSeconds;
   config.nativeLoop.engine.maxContext = arguments.maxContext;
   config.nativeLoop.engine.decodeShare = arguments.decodeShare;
+  config.nativeLoop.engine.prefillCommandMilliseconds = arguments.prefillCommandMilliseconds;
   return config;
 }
 

@@ -53,6 +53,14 @@ OPTIONS = {
         ("", "turbo", "XHIGH"),
     ),
     "--kv-format": values("--kv-format", {"int8": "int8", "bf16": "bf16"}, ("fp16",)),
+    "--prefill-mode": values(
+        "--prefill-mode", {"bounded": "bounded", "full": "full"}, ("fast", "")
+    ),
+    "--prefill-bound-ms": values(
+        "--prefill-bound-ms",
+        {"1": 1, "3000": 3000, "600000": 600000},
+        ("0", "-5", "2s", "600001", "1.5"),
+    ),
     "--max-memory": values(
         "--max-memory",
         {

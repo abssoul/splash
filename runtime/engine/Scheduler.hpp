@@ -5,12 +5,23 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <span>
 #include <unordered_map>
 #include <vector>
 
 namespace splash::engine {
+
+// One prefill command runs as one GPU command buffer. On M1 and M2 a full
+// budget over a long context takes up to a minute, and macOS aborts a command
+// that holds the GPU while the display needs it (ImpactingInteractivity);
+// under desktop load an M2 Max aborted 3-5 s commands but not 3 s ones.
+// Isolated prefill keeps each command within this bound; short contexts on
+// current GPUs still get the full budget.
+inline constexpr double kDefaultPrefillCommandMilliseconds = 2000.0;
+inline constexpr double kUnboundedPrefillCommand =
+    std::numeric_limits<double>::infinity();
 
 enum class Phase : uint8_t {
   Queued,
@@ -52,6 +63,9 @@ struct SchedulerSnapshot final {
   uint64_t decodeBatches = 0;
   std::array<uint64_t, model::ExecutionLimits::maximumBatchWidth>
       decodeBatchesByWidth{};
+  // The isolated prefill command bound in effect; a restart after a
+  // display-stall abort lowers it. kUnboundedPrefillCommand reports as null.
+  double prefillBoundMilliseconds = kDefaultPrefillCommandMilliseconds;
 };
 
 // One single-owner policy for the specialized backend. Prefill packs the
@@ -67,6 +81,10 @@ public:
 
   void submit(RequestSpec request);
   void observePrefill(uint32_t rows, double wallMilliseconds);
+  // Isolated prefill commands stay within this many milliseconds of GPU
+  // time; kUnboundedPrefillCommand restores full-budget commands whatever
+  // their duration.
+  void boundIsolatedPrefill(double milliseconds);
   void deferAdmission(uint64_t requestId);
   void waitForResources(uint64_t requestId);
   void waitForPrefix(uint64_t requestId);
@@ -165,6 +183,7 @@ private:
   uint64_t order_ = 0;
   uint64_t decodeDispatchOrder_ = 0;
   double prefillMillisecondsPerToken_ = 0.0;
+  double isolatedPrefillMilliseconds_ = kDefaultPrefillCommandMilliseconds;
   double decodeShare_;
   // Decode time that prefill still owes the lanes that decoded beside it
   // (not those waiting for a mask): equal-priority decode runs until its
