@@ -50,6 +50,7 @@ private:
   MoeExpertSimdgroups moeDecodeSimdgroups_ = MoeExpertSimdgroups::Eight;
   uint32_t appleGpuFamily_ = 0;
   AttentionTile attentionTile_ = AttentionTile::Mpp;
+  MoeExpertKernel moeExpertKernel_ = MoeExpertKernel::Mpp;
 };
 
 } // namespace splash::ops

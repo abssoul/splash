@@ -29,7 +29,10 @@ ExecutionPlans::ExecutionPlans(const DeviceCapabilities &device)
       appleGpuFamily_(device.appleGpuFamily),
       // Apple7/8 have no bfloat arithmetic; their prefill and verify attention
       // run the register tile.
-      attentionTile_(device.appleGpuFamily < 9 ? AttentionTile::Register : AttentionTile::Mpp) {}
+      attentionTile_(device.appleGpuFamily < 9 ? AttentionTile::Register : AttentionTile::Mpp),
+      // Apple7/8 run the register affine expert tiles in both phases.
+      moeExpertKernel_(device.appleGpuFamily < 9 ? MoeExpertKernel::Register
+                                                 : MoeExpertKernel::Mpp) {}
 
 PrefillAttentionPlan ExecutionPlans::prefillAttention(
     uint32_t rows, uint32_t queryHeads, kv::Layout layout) const {
@@ -55,6 +58,7 @@ MoeConfig ExecutionPlans::moeConfig(MoeShape shape, uint32_t rows, MoePhase phas
   config.routeWideRows = moeRouteWideRows_;
   config.expertTile = prefill ? MoeExpertTile::M32 : MoeExpertTile::M8;
   if (!prefill) config.m8Simdgroups = moeDecodeSimdgroups_;
+  if (shape.weightLayout == WeightLayout::Affine64) config.kernel = moeExpertKernel_;
   if (shape.weightLayout == WeightLayout::Block32) {
     const MoeGgufTile tile = moeGgufTile(appleGpuFamily_, shape);
     if (prefill) config.expertTile = moeGgufPrefillTile(shape, rows, tile);

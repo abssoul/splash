@@ -140,9 +140,12 @@ void baselinePlans() {
 // plans run the split 32-row passes on every family and keep the shipped
 // simdgroups they do not run.
 void moeDeviceTiles() {
-  for (uint32_t family : {0U, 9U, 10U, 11U}) {
+  for (uint32_t family : {0U, 7U, 8U, 9U, 10U, 11U}) {
     const auto expected = family == 9 ? MoeExpertSimdgroups::Four
                                       : MoeExpertSimdgroups::Eight;
+    // Apple7/8 run the register affine expert tiles in both phases, fused at
+    // either row count (as does an unknown family, which startup refuses).
+    const auto kernel = family < 9 ? MoeExpertKernel::Register : MoeExpertKernel::Mpp;
     require(moeDecodeSimdgroups(family) == expected,
             "decode expert simdgroups are not gated on GPU family 9");
     const ExecutionPlans plans(device(family));
@@ -150,14 +153,15 @@ void moeDeviceTiles() {
       for (uint32_t lanes = 1; lanes <= 4; ++lanes) {
         const MoePlan plan = plans.moeDecode(shape, lanes);
         require(plan.configuration().m8Simdgroups == expected && plan.tileRows() == 8 &&
-                    !plan.splitExperts(),
+                    plan.configuration().kernel == kernel && !plan.splitExperts(),
                 "MoE decode plan departed from the device tile policy");
       }
       for (uint32_t rows : {1U, 8U, 17U, 2048U}) {
         const MoePlan plan = plans.moePrefill(shape, rows);
-        require(plan.tileRows() == 32 && plan.splitExperts() &&
+        require(plan.tileRows() == 32 && plan.configuration().kernel == kernel &&
+                    plan.splitExperts() == (kernel == MoeExpertKernel::Mpp) &&
                     plan.configuration().m8Simdgroups == MoeExpertSimdgroups::Eight,
-                "MoE prefill plan left the split 32-row passes");
+                "MoE prefill plan left the device's 32-row passes");
       }
     }
   }
