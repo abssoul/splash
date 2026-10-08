@@ -39,8 +39,11 @@ class AneFfn final {
 public:
   // A chunk runs on the smallest of the program's functions that holds it,
   // one every kProgramStep rows from kMinimumRows to the prefill budget,
-  // since an evaluation costs the ANE its function's rows.
-  static constexpr uint32_t kMinimumRows = 512, kProgramStep = 128, kMaximumRows = SPLASH_PREFILL_TOKEN_BUDGET;
+  // since an evaluation costs the ANE its function's rows. This fork starts
+  // at 256 rows: on M1 and M2 the GPU alone is slow enough that smaller
+  // chunks gain (calibration on an M1 Max splits the 27B's chunks from 287
+  // rows), and calibration still drops the functions that lose to it.
+  static constexpr uint32_t kMinimumRows = 256, kProgramStep = 128, kMaximumRows = SPLASH_PREFILL_TOKEN_BUDGET;
   static_assert(kMaximumRows >= kMinimumRows && (kMaximumRows - kMinimumRows) % kProgramStep == 0,
                 "the functions cover the chunks the split takes");
 

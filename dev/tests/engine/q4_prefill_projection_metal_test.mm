@@ -279,7 +279,8 @@ void runLeadingInputs(MetalBackend &backend, std::mt19937 &random) {
   };
   for (const Kernel kernel : std::vector<Kernel>{{"prefill_linear_q4_n256_residual", 256, 256},
                                                  {"prefill_linear_q4_n128_residual", 128, 256},
-                                                 {"prefill_linear_q4_n128_residual_sg4", 128, 128}}) {
+                                                 {"prefill_linear_q4_n128_residual_sg4", 128, 128},
+                                                 {"prefill_linear_q4_mma64_residual", 64, 128}}) {
     const auto run = [&](const std::string &pipeline, const MetalBuffer &w, const MetalBuffer &s,
                          const MetalBuffer &b, const void *params, size_t paramBytes) {
       MetalBuffer output = shared(backend, outputBytes, kernel.pipeline);

@@ -205,6 +205,23 @@ kernel void prefill_linear_q4_mma64_residual(
                                           sums, p.output_size, p.input_size, tg, sg, lane);
 }
 
+// The residual kernel over a view of the leading inputs of wider weight rows,
+// for the Neural Engine FFN split's down projection: the planes advance past the
+// parameters the view leaves unread in the storage tiles before its column
+// tile, and the tile then addresses rows of input_size inputs.
+kernel void prefill_linear_q4_mma64_residual_leading_inputs(
+    device const bfloat *input [[buffer(0)]], device const uchar *weights [[buffer(1)]],
+    device const bfloat *scales [[buffer(2)]], device const bfloat *biases [[buffer(3)]],
+    device const bfloat *residual [[buffer(4)]], device bfloat *output [[buffer(5)]],
+    device const float *sums [[buffer(6)]], constant Q4PrefillLeadingParams &p [[buffer(7)]],
+    Q4MM_THREADS) {
+  const ulong unread = ulong(tg.y * q4mm::kColumns / q4mm::kStorageN) *
+      (p.plane_input_size / q4mm::kGroup - p.matrix.input_size / q4mm::kGroup) * q4mm::kStorageN;
+  q4mm::project<q4mm::Epilogue::Residual>(input, weights + unread * (q4mm::kGroup / 2), scales + unread,
+                                          biases + unread, output, residual, sums, p.matrix.output_size,
+                                          p.matrix.input_size, tg, sg, lane);
+}
+
 kernel void prefill_linear_q4_mma64_up_silu_sums(
     device const bfloat *input [[buffer(0)]], device const uchar *weights [[buffer(1)]],
     device const bfloat *scales [[buffer(2)]], device const bfloat *biases [[buffer(3)]],

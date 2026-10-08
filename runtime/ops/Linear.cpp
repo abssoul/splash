@@ -102,14 +102,16 @@ bool supportsFourSimdgroups(LinearWorkload w, LinearTile tile) noexcept {
 
 // Throws if `p` is a view of the leading inputs of wider weight rows
 // (Projection::leadingInputs) that `plan` has no kernel instance for: only the
-// prefill residual tiles of affine Q4 weights (N128, N256) and of quantized
+// prefill residual tiles of affine Q4 weights (N128, N256, Q4Mma64) and of quantized
 // GGUF segments (GgufPrefill), unrotated, read one (leadingInputsInstance).
 void requireLeadingInputs(const LinearPlan &plan, const Projection &p) {
   if (!p.planeInputs()) return;
   const LinearWorkload w = plan.workload();
   const LinearTile tile = plan.configuration().tile;
   if (w.phase != LinearPhase::Prefill || w.epilogue != LinearEpilogue::Residual ||
-      (tile != LinearTile::N128 && tile != LinearTile::N256 && tile != LinearTile::GgufPrefill) || p.rotation)
+      (tile != LinearTile::N128 && tile != LinearTile::N256 && tile != LinearTile::Q4Mma64 &&
+       tile != LinearTile::GgufPrefill) ||
+      p.rotation)
     throw std::invalid_argument("a view of leading inputs runs only the quantized prefill residual tiles");
 }
 

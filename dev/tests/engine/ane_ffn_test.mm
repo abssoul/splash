@@ -566,7 +566,7 @@ void split(MetalBackend &backend, const Linear &linear, const Model &model, cons
   if (split->share() != 0.5) fail(model.name + ": runs share " + std::to_string(split->share()));
   if (split->splits(AneFfn::kMinimumRows - 1) || !split->splits(AneFfn::kMinimumRows) ||
       !split->splits(AneFfn::kMaximumRows) || split->splits(AneFfn::kMaximumRows + 1))
-    fail(model.name + ": the split takes other chunks than those of 512 to 2048 rows");
+    fail(model.name + ": the split takes other chunks than those of 256 to 2048 rows");
   // The plan takes whole pages of each of its four buffers, of which Metal may report less.
   const uint64_t planned = AneFfn::plannedBytes(model.layers, kAneUnits), allocated = split->allocatedBytes();
   if (allocated > planned || planned - allocated >= 4 * kHostPageBytes)
@@ -584,7 +584,7 @@ void split(MetalBackend &backend, const Linear &linear, const Model &model, cons
            "% RMS from the GPU alone" + (got.usable ? "" : ", unusable: " + split->reason()));
   }
   section("split: " + model.name + " layers at share 0.5 from layers gone before it runs, its planned memory, "
-          "chunks of 2048, 512 and 700 rows");
+          "chunks of 2048, 256 and 700 rows");
 
   // A least chunk of more rows leaves the smaller ones to the GPU; one of rows no function holds is refused.
   split->setMinimumRows(640);
@@ -878,7 +878,7 @@ void split(MetalBackend &backend) {
 }
 
 // ---------------------------------------------------------------- faults
-// Each fault of an evaluation at layer 0, 1 and 2 of chunks of 512, 700 and 2048 rows stops the split (stops()); an
+// Each fault of an evaluation at layer 0, 1 and 2 of chunks of 256, 700 and 2048 rows stops the split (stops()); an
 // evaluation that signals the event below its value leaves it there.
 void faults(MetalBackend &backend) {
   using Faults = ane::ProgramInstrumentation::Faults;
@@ -905,7 +905,7 @@ void faults(MetalBackend &backend) {
       for (const uint32_t count : {AneFfn::kMinimumRows, 700u, AneFfn::kMaximumRows})
         stops(backend, linear, model, buffers, kind.arm(layer + 1),
               std::string(kind.name) + " at layer " + std::to_string(layer), count, kind.reason);
-    section(std::string("faults: ") + kind.name + " at each layer of chunks of 512, 700 and 2048 rows");
+    section(std::string("faults: ") + kind.name + " at each layer of chunks of 256, 700 and 2048 rows");
   }
 
   // A program that does not load again after the idle release.
@@ -1094,13 +1094,6 @@ int main(int argc, char **argv) {
   }
   try {
     MetalBackend backend(argv[1]);
-    // This fork runs the Neural Engine split only where it has measured it,
-    // and its Apple7/8 prefill kernels have no leading-inputs instance.
-    if (mode != "kernels" && backend.capabilities().appleGpuFamily < 9) {
-      std::cout << "ane-ffn " << mode << ": skipped on Apple GPU family "
-                << backend.capabilities().appleGpuFamily << "\n";
-      return 0;
-    }
     if (mode == "kernels") {
       std::vector<float> sign(ANE_FFN_INTERMEDIATE_BLOCK);
       for (float &value : sign) value = rng() & 1 ? -1.0f : 1.0f;

@@ -412,8 +412,6 @@ void Linear::addGgufPrefill(metal::CommandGraph &graph, const LinearBuffers &b,
     const std::string kernel = prefillKernel(s.name(), epilogue, mma);
     const uint32_t threads = mma ? kMmaPrefillThreads : GGUF_PREFILL_THREADS;
     if (p.planeInputs()) {
-      if (mma)
-        throw std::invalid_argument("the MMA GGUF prefill kernels have no leading-inputs instance");
       graph.add(leadingInputsInstance(kernel), std::move(bindings),
                 GgufPrefillLeadingParams{params, p.planeInputs()}, groups, {threads, 1, 1});
     } else

@@ -128,6 +128,26 @@ inline void gguf_prefill_mma(device bfloat *input, device uchar *w0, device ucha
   GGUF_PREFILL_MMA(F, f) GGUF_PREFILL_MMA_EPILOGUE(F, f, r, EpResidual) GGUF_PREFILL_MMA_EPILOGUE(F, f, g, EpUpWithGate)
 QUANT_FORMATS(GGUF_PREFILL_MMA_FORMAT)
 #undef GGUF_PREFILL_MMA_FORMAT
+
+// The residual kernels over a view of the leading inputs of wider weight rows, for the Neural Engine FFN split's down
+// projection, one per format: the planes advance past the groups and meta units the view leaves unread in the rows of
+// the plane tiles before the column tile, as gguf_prefill_*_r_leading_inputs does for the MPP tile.
+#define GGUF_PREFILL_MMA_LEADING_INPUTS(F, f)                                                                      \
+  kernel void gguf_prefill_mma_##f##_r_leading_inputs(GGUF_PREFILL_MMA_BUFFERS, device bfloat *aux [[buffer(5)]],  \
+                                                      constant GgufPrefillLeadingParams &leading [[buffer(6)]],    \
+                                                      GGUF_PREFILL_MMA_THREAD) {                                   \
+    GGUF_PREFILL_MMA_TABLES(F);                                                                                    \
+    constant GgufPrefillParams &p = leading.prefill;                                                               \
+    const ulong before = ulong(group.y * GGUF_TILE_COLUMNS / QUANT_TILE_ROWS) * QUANT_TILE_ROWS;                   \
+    const uint groups = p.input_size / 32, plane_groups = leading.plane_input_size / 32;                           \
+    const ulong unread = before * (plane_groups - groups),                                                         \
+                unread_units = before * (plane_groups / F::MetaGroups - groups / F::MetaGroups);                   \
+    gguf_prefill_mma<F, EpResidual>(input, w0 + unread * F::P0, w1 + unread * F::P1,                               \
+                                    meta + unread_units * F::MetaBytes, output, aux, p, group, simd_lane,          \
+                                    simd_group, stage, tl);                                                        \
+  }
+QUANT_FORMATS(GGUF_PREFILL_MMA_LEADING_INPUTS)
+#undef GGUF_PREFILL_MMA_LEADING_INPUTS
 #undef GGUF_PREFILL_MMA_EPILOGUE
 #undef GGUF_PREFILL_MMA
 #undef GGUF_PREFILL_MMA_TABLES
