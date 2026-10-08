@@ -213,7 +213,7 @@ void testCleanRuntimeStatus(const char *goldenPath) {
   auto unbounded = engine;
   unbounded.scheduler.prefillBoundMilliseconds = kUnboundedPrefillCommand;
   require(runtimeStatusJson(memoryPlan, unbounded, metal, warmup, audit(memoryPlan), metrics,
-                            executorTelemetry, identity, governor, true, {}, {}, {}, {})
+                            executorTelemetry, identity, governor, true, {}, {}, {}, {}, {})
                   .find("\"prefill_bound_ms\":null,") != std::string::npos,
           "status did not report an unbounded prefill command as null");
   require(json.find("\"persistent\":true,\"kv_copies\":64,\"kv_copy_failures\":0,"

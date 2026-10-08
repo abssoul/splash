@@ -370,7 +370,9 @@ class ServeOptionsTests(unittest.TestCase):
         self.assertNotIn("--prefill-mode", api._native_command(args))
         self.assertNotIn("--prefill-bound-ms", api._native_command(args))
         full_args = api.parse_args([*required, "--prefill-mode", "full"])
-        self.assertEqual(api._native_command(full_args)[-2:], ["--prefill-mode", "full"])
+        self.assertEqual(
+            api._native_command(full_args)[-2:], ["--prefill-mode", "full"]
+        )
         bound_args = api.parse_args([*required, "--prefill-bound-ms", "3000"])
         self.assertEqual(
             api._native_command(bound_args)[-2:], ["--prefill-bound-ms", "3000"]

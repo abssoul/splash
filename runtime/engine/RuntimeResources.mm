@@ -705,6 +705,12 @@ AneFfnModel aneFfnModel(metal::MetalBackend &backend, const model::LoadedModel &
   AneFfnModel model;
   model.dense = !layers->empty();
   if (!model.dense) return model;
+  // This fork has measured its kernels on Apple7/8, not the Neural Engine
+  // split; the GPU runs the dense FFN there until someone measures it.
+  if (backend.capabilities().appleGpuFamily < 9) {
+    model.unsupported = "the Neural Engine split is unmeasured on Apple7/8 GPUs";
+    return model;
+  }
   if (const char *reason = ops::AneFfn::unsupported(*layers)) {
     model.unsupported = reason;
     return model;

@@ -108,8 +108,8 @@ std::string_view name(LinearTile tile) {
     ENUMERATOR_NAME(LinearTile::GgufStaged);
     ENUMERATOR_NAME(LinearTile::GgufPrefill);
     ENUMERATOR_NAME(LinearTile::GgufRegister);
-    ENUMERATOR_NAME(LinearTile::SimdgroupF32);
-    ENUMERATOR_NAME(LinearTile::Mma64);
+    ENUMERATOR_NAME(LinearTile::Q4RegisterF32);
+    ENUMERATOR_NAME(LinearTile::Q4Mma64);
   }
   unnamed();
 }
