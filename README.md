@@ -9,6 +9,8 @@
 >   (upstream 1.3.0 plus the M1/M2 commits).
 > - **On M1/M2 this build runs** the models upstream 1.3 loads (GGUF, including Prism ML's Ternary
 >   Bonsai `PQ2_0`, and MLX 4-bit) on its own kernels, the vision encoder included.
+> - **Neural Engine prefill** (new in upstream 1.3) runs on M1/M2 too: the 27B processes long
+>   prompts about 1.5x faster on an M1 Max. `--disable-ane` keeps everything on the GPU.
 > - **M3 and newer:** use official Splash, `brew install incoai/tap/splash`.
 > - **M1/M2 problems:** open an issue here, not upstream.
 >
