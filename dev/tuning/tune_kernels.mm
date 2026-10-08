@@ -104,7 +104,7 @@ std::string_view name(LinearTile tile) {
     ENUMERATOR_NAME(LinearTile::Paired128);
     ENUMERATOR_NAME(LinearTile::Split128);
     ENUMERATOR_NAME(LinearTile::Paired256);
-    ENUMERATOR_NAME(LinearTile::Simdgroup);
+    ENUMERATOR_NAME(LinearTile::Q4Register);
     ENUMERATOR_NAME(LinearTile::GgufStaged);
     ENUMERATOR_NAME(LinearTile::GgufPrefill);
     ENUMERATOR_NAME(LinearTile::GgufRegister);
@@ -238,16 +238,16 @@ int main(int argc, char **argv) {
         return governed(bytes, allocate);
       };
 
-      const auto descriptor = model::inspectModelPackage(modelRoot);
-      std::optional<model::ModelPackage> package;
+      const auto descriptor = model::inspectModelRoot(modelRoot);
+      std::optional<model::LoadedModel> loaded;
       if (!admit(model::modelWeightBytes(modelRoot, descriptor),
-                 [&] { package.emplace(model::loadModelPackage(backend, modelRoot, descriptor)); }))
-        throw std::runtime_error("model package memory admission denied or interrupted");
+                 [&] { loaded.emplace(model::loadModel(backend, modelRoot, descriptor)); }))
+        throw std::runtime_error("model weight memory admission denied or interrupted");
       const auto workloads =
-          model::collectTuningWorkloads(*package, kPrefillProbeRows, kDecodeProbeWidths);
+          model::collectTuningWorkloads(*loaded, kPrefillProbeRows, kDecodeProbeWidths);
 
       std::cout << "tune-kernels: " << device.deviceName << " (Apple GPU family "
-                << device.appleGpuFamily << "), model " << package->name() << ", build "
+                << device.appleGpuFamily << "), model " << loaded->name() << ", build "
                 << SPLASH_BUILD_ID << "\n  " << options.measurement.samplePairs
                 << " pairs per candidate, " << options.measurement.maximumWallSeconds
                 << " s per key\n";

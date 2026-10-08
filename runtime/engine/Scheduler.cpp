@@ -12,8 +12,19 @@ namespace {
 constexpr uint32_t kMaximumOvertakes =
     model::ExecutionLimits::maximumBatchWidth - 1;
 
+// The slice a contended prefill command aims for: while peers of its
+// priority decode, the budget halves until its measured cost fits, so they
+// wait about this long between steps. A latency target, not a deadline: the
+// first command has no measurement, and the budget stops at
+// kMinimumPrefillRows.
 constexpr double kContendedPrefillMilliseconds = 500.0;
+// The fewest rows a contended prefill command is cut to, and the fewest whose
+// time measures prefill throughput: below it a command's fixed costs dominate.
 constexpr uint32_t kMinimumPrefillRows = 64;
+// The weight of a command's measured per-token time in the running estimate:
+// one unusually slow or fast command moves it a quarter of the way, and a
+// lasting change carries it within a few commands.
+constexpr double kPrefillTimeWeight = 0.25;
 
 // A command excludes at most the lanes of a full batch: a linear search.
 bool listed(std::span<const uint64_t> ids, uint64_t id) noexcept {
@@ -259,8 +270,8 @@ std::optional<BatchPlan> Scheduler::next(std::span<const uint64_t> excluded) con
                                              : std::move(prefill);
   }
 
-  // Prefill and decode use different Metal graphs and cannot be packed into
-  // one command. Honor request priority first. Then decode runs while
+  // Prefill and decode use different Metal graphs and cannot share one
+  // command. Honor request priority first. Then decode runs while
   // prefill owes it time, and otherwise the kinds alternate at command
   // boundaries so equal-priority work cannot starve.
   if (decodeDebtMilliseconds_ > 0.0)
@@ -552,7 +563,8 @@ void Scheduler::observePrefill(uint32_t rows, double wallMilliseconds) {
   const double observed = wallMilliseconds / rows;
   prefillMillisecondsPerToken_ =
       prefillMillisecondsPerToken_ > 0.0
-          ? 0.75 * prefillMillisecondsPerToken_ + 0.25 * observed
+          ? (1.0 - kPrefillTimeWeight) * prefillMillisecondsPerToken_ +
+                kPrefillTimeWeight * observed
           : observed;
 }
 

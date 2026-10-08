@@ -21,6 +21,7 @@
 #include "../../../runtime/ops/Linear.hpp"
 #include "../../../runtime/ops/MoE.hpp"
 #include "GgufFormatReference.hpp"
+#include "MoeExtents.hpp"
 #include "metal/abi/Gguf.h"
 #include "metal/abi/MoE.h"
 
@@ -211,7 +212,7 @@ int floatProjection(MetalBackend &backend) {
             std::memset(output.contents(), 0x7F, output.sizeBytes());
             CommandGraph graph;
             splash::ops::addGgufFloat(graph, input, w.segment, output, rows, stride, offset, type, tile);
-            static_cast<void>(backend.submitCommand(graph.dispatches()));
+            static_cast<void>(backend.submitCommandAsync(graph.dispatches()).wait());
             size_t outside = 0, touched = 0;
             for (uint32_t r = 0; r <= rows; ++r)
               for (uint32_t c = 0; c < stride; ++c) {
@@ -290,7 +291,7 @@ int floatSegments(MetalBackend &backend, uint32_t floatColumns) {
       CommandGraph graph;
       add(graph, input, full, y);
       add(graph, input, quantizedOnly, reference);
-      static_cast<void>(backend.submitCommand(graph.dispatches()));
+      static_cast<void>(backend.submitCommandAsync(graph.dispatches()).wait());
       const auto *got = static_cast<const uint16_t *>(y.contents()), *want = static_cast<const uint16_t *>(reference.contents());
       size_t differ = 0, outside = 0, written = 0;
       for (uint32_t r = 0; r < rows; ++r)
@@ -374,9 +375,9 @@ int floatOnlyChain(MetalBackend &backend) {
         linear.add(graph, {.input = input, .output = scores, .scratch = scratch}, floats, linear.decodePlan(floats, lanes));
     static_cast<void>(
         linear.add(graph, {.input = input, .output = chained, .scratch = scratch, .prepared = prepared}, blocks, plan));
-    static_cast<void>(backend.submitCommand(graph.dispatches()));
+    static_cast<void>(backend.submitCommandAsync(graph.dispatches()).wait());
     static_cast<void>(linear.add(reference, {.input = input, .output = alone, .scratch = scratch}, blocks, plan));
-    static_cast<void>(backend.submitCommand(reference.dispatches()));
+    static_cast<void>(backend.submitCommandAsync(reference.dispatches()).wait());
     if (std::memcmp(chained.contents(), alone.contents(), bytes)) {
       printf("  float-only projection B%u: a register plan chained after it read another table FAIL\n", lanes);
       ++failures;
@@ -449,7 +450,7 @@ std::vector<uint16_t> runPlan(MetalBackend &backend, const Model &m, Buffers &b,
   std::memset(b.moe.output.contents(), 0, b.moe.output.sizeBytes());
   CommandGraph graph;
   MoE::add(graph, b.moe, m.weights, plan);
-  static_cast<void>(backend.submitCommand(graph.dispatches()));
+  static_cast<void>(backend.submitCommandAsync(graph.dispatches()).wait());
   const auto *selected = static_cast<const uint32_t *>(b.moe.scratch.selectedExperts.contents());
   const auto *routing = static_cast<const float *>(b.moe.scratch.routingWeights.contents());
   const auto *routeRows = static_cast<const uint32_t *>(b.moe.scratch.routeRows.contents());
@@ -573,6 +574,60 @@ std::vector<uint16_t> runPlan(MetalBackend &backend, const Model &m, Buffers &b,
   return result;
 }
 
+// Each buffer a register decode plan and a staged 32-row prefill plan reach,
+// at its extent and one element short, and each weight: the planes of every
+// expert tensor, whose rows fill whole tiles, in units of a row's group of
+// 32 inputs or meta unit (metal/abi/QuantFormat.h), and the shared scalar
+// gate's fp32 weights.
+void bufferExtents(MetalBackend &backend) {
+  const Model m = makeModel(backend, 0);
+  const MoeShape shape{kHidden, kExperts, kTopK, kIntermediate, WeightLayout::Block32};
+  Buffers b;
+  b.moe.input = zeros(backend, uint64_t{kMaximumRows} * kHidden * 2, "moe-input");
+  b.moe.residual = zeros(backend, uint64_t{kMaximumRows} * kHidden * 2, "moe-residual");
+  b.moe.output = zeros(backend, uint64_t{kMaximumRows} * kHidden * 2, "moe-output");
+  for (const MoePlan &plan :
+       {MoE::decodePlan(shape, 4,
+                        MoeConfig{MoeExpertTile::M8, moeRouteWideRows(kAssumedGpuCores), MoeExpertSimdgroups::Eight,
+                                  MoeGgufTile::Register}),
+        MoE::prefillPlan(shape, 33, MoeConfig{MoeExpertTile::M32})}) {
+    allocate(backend, b, plan);
+    splash::test::requireMoeExtents(backend, b.moe, m.weights, plan);
+  }
+  const MoePlan plan = MoE::prefillPlan(shape, 33, MoeConfig{MoeExpertTile::M32});
+  allocate(backend, b, plan);
+  const BlockMoeWeights &blocks = m.weights.blocks();
+  // A weight buffer of the block that `with` puts in its place.
+  const auto requireWeightExtent = [&](const MetalBuffer &buffer, uint64_t bytes, uint64_t element,
+                                       const std::string &name, const auto &with) {
+    splash::test::requireExtent(backend, buffer, bytes, element, name, [&](CommandGraph &graph, const MetalBuffer &view) {
+      BlockMoeWeights changed = blocks;
+      with(changed, view);
+      MoE::add(graph, b.moe, changed, plan);
+    });
+  };
+  for (const auto &[member, name] : {std::pair{&BlockMoeWeights::gate, "gate"}, std::pair{&BlockMoeWeights::up, "up"},
+                                     std::pair{&BlockMoeWeights::down, "down"}})
+    for (const auto &[segment, kind] : {std::pair{&BlockExpertProjection::routed, "MoE expert "},
+                                        std::pair{&BlockExpertProjection::shared, "MoE shared "}}) {
+      const QuantizedSegment &tensor = blocks.*member.*segment;
+      const QuantFormat &format = kQuantFormats[tensor.formatId];
+      const uint64_t groups = uint64_t{tensor.outputSize} * (tensor.inputSize / 32);
+      for (const auto &[plane, planeName, unitBytes, units] :
+           {std::tuple{&QuantizedSegment::plane0, " plane0", format.plane0_bytes, groups},
+            std::tuple{&QuantizedSegment::plane1, " plane1", format.plane1_bytes, groups},
+            std::tuple{&QuantizedSegment::meta, " meta", format.meta_bytes, groups / format.meta_groups}}) {
+        if (!unitBytes) continue;
+        requireWeightExtent(tensor.*plane, units * unitBytes, unitBytes, std::string(kind) + name + planeName,
+                            [&](BlockMoeWeights &changed, const MetalBuffer &view) {
+                              (changed.*member.*segment).*plane = view;
+                            });
+      }
+    }
+  requireWeightExtent(blocks.sharedScalarGate.plane0, uint64_t{kHidden} * 4, 4, "MoE shared scalar gate weight",
+                      [](BlockMoeWeights &changed, const MetalBuffer &view) { changed.sharedScalarGate.plane0 = view; });
+}
+
 int moe(MetalBackend &backend) {
   int failures = 0;
   Buffers b;
@@ -676,6 +731,7 @@ int main(int argc, const char *argv[]) {
     }
     try {
       MetalBackend backend(argv[1]);
+      bufferExtents(backend);
       const int failures = floatProjection(backend) + floatSegments(backend, 64) + floatSegments(backend, 96) +
                            floatOnlyChain(backend) + moe(backend);
       if (failures) {

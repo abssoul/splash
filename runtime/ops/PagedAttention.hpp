@@ -109,7 +109,8 @@ enum class AttentionTile : uint8_t { Mpp = 0, Register = 1 };
 // encoding. Each prefill uses one split dispatch followed by one reduction.
 // Callers cannot replace a dispatch or reduce its scratch bound.
 struct PrefillAttentionPlan final {
-  const kv::Format format;
+  const kv::Layout layout;
+  const uint32_t queryHeads;
   const uint32_t rows;
   const uint32_t splits;
   const AttentionWorkspace workspace;
@@ -124,15 +125,16 @@ private:
   PrefillAttentionPlan(uint32_t rows, uint32_t splits, AttentionWorkspace workspace,
                        std::string_view splitPipeline, std::string_view reducePipeline,
                        metal::DispatchSize splitGroups, metal::DispatchSize splitThreads,
-                       metal::DispatchSize reduceGroups, kv::Format format)
-      : format(format), rows(rows),
+                       metal::DispatchSize reduceGroups, kv::Layout layout, uint32_t queryHeads)
+      : layout(layout), queryHeads(queryHeads), rows(rows),
         splits(splits), workspace(workspace),
         splitPipeline(splitPipeline), reducePipeline(reducePipeline),
         splitGroups(splitGroups), splitThreads(splitThreads), reduceGroups(reduceGroups) {}
 };
 
 struct VerifyAttentionPlan final {
-  const kv::Format format;
+  const kv::Layout layout;
+  const uint32_t queryHeads;
   const uint32_t lanes;
   // Each lane's history-scaled split count; splits is their maximum, the
   // split grid and the slot stride of every lane's partials. The workspace
@@ -158,8 +160,8 @@ private:
                       metal::DispatchSize splitGroups, metal::DispatchSize splitThreads,
                       metal::DispatchSize reduceGroups,
                       std::string_view storePipeline, metal::DispatchSize storeGroups,
-                      metal::DispatchSize storeThreads, kv::Format format)
-      : format(format), lanes(lanes), laneSplits(laneSplits),
+                      metal::DispatchSize storeThreads, kv::Layout layout, uint32_t queryHeads)
+      : layout(layout), queryHeads(queryHeads), lanes(lanes), laneSplits(laneSplits),
         splits(splits), workspace(workspace),
         splitPipeline(splitPipeline), reducePipeline(reducePipeline),
         splitGroups(splitGroups), splitThreads(splitThreads), reduceGroups(reduceGroups),
@@ -195,7 +197,7 @@ public:
 
   // The runtime owns allocation, not the selected kernel's workspace layout.
   // Prefill storage covers every sequence length up to maximumRows; sequences
-  // in a packed command reuse it serially. Verify storage covers all lanes at
+  // in a ragged command reuse it serially. Verify storage covers all lanes at
   // the maximum split count.
   [[nodiscard]] static AttentionWorkspace
   prefillWorkspace(uint32_t maximumRows, uint32_t queryHeads,

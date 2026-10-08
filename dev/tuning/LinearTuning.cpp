@@ -31,13 +31,12 @@ struct Layout final {
   uint64_t bytes = 0;
 };
 
-// Plans of one K partition outside the register-matrix tiles (Simdgroup,
-// SimdgroupF32, Mma64) store bitwise-identical outputs for a workload. Any other pair may round
-// differently even with as many K splits on both sides, so it is held to the
-// derived bound.
+// Plans of one K partition outside the register-matrix tiles (Q4Register,
+// Q4RegisterF32, Q4Mma64) store bitwise-identical outputs for a workload. Any
+// other pair may round differently even with as many K splits on both sides,
+// so it is held to the derived bound.
 bool sequential(const LinearPlan &plan) {
-  return plan.configuration().splits == 1 && !plan.usesSimdgroup() &&
-         plan.configuration().tile != LinearTile::Mma64;
+  return plan.configuration().splits == 1 && !plan.registerMatrix();
 }
 bool bitwiseComparable(const LinearPlan &baseline, const LinearPlan &candidate) {
   return sequential(baseline) && sequential(candidate);
@@ -190,7 +189,7 @@ std::vector<LinearPlan> linearCandidates(const DeviceCapabilities &device,
   if (w.epilogue != LinearEpilogue::GateUp) append({LinearTile::N128, columns / 128});
   if (w.epilogue != LinearEpilogue::Residual) append({LinearTile::N256, columns / 256});
   // Split128 partitions K in whole 256-input blocks.
-  if (device.appleGpuFamily >= 10)
+  if (gpuFamilyClass(device.appleGpuFamily) == GpuFamilyClass::Apple10)
     for (uint32_t splits = 2;
          splits <= LinearConfig::kMaximumSplits && splits <= w.matrix.inputSize / 256; splits *= 2)
       append({LinearTile::Split128, 0, LinearSimdgroups::Eight, splits});
@@ -288,7 +287,7 @@ LinearTuningResult tuneLinear(metal::MetalBackend &backend,
         linear.add(graph, buffers, weights.projection, plans.at(candidate.value),
                    weights.gate ? &*weights.gate : nullptr);
       }
-      const auto timing = backend.submitCommand(graph.dispatches());
+      const auto timing = backend.submitCommandAsync(graph.dispatches()).wait();
       const double wall = std::chrono::duration<double>(Clock::now() - wallStart).count();
       return {timing.gpuSeconds, wall, underPressure && underPressure()};
     };
@@ -309,9 +308,9 @@ LinearTuningResult tuneLinear(metal::MetalBackend &backend,
     float operandSlack = 0;
     auto referenceGateUp = [&](uint32_t representative) {
       if (fields[PreparedInput]) {
-        operandSlack = simdgroupSlack(workload, buffers.input, input.weights[representative].projection);
+        operandSlack = q4RegisterSlack(workload, buffers.input, input.weights[representative].projection);
         if (input.weights[representative].gate)
-          operandSlack = std::max(operandSlack, simdgroupSlack(workload, buffers.input, *input.weights[representative].gate));
+          operandSlack = std::max(operandSlack, q4RegisterSlack(workload, buffers.input, *input.weights[representative].gate));
       }
       if (!exactPlain) return;
       const auto &weights = input.weights[representative];
@@ -320,7 +319,7 @@ LinearTuningResult tuneLinear(metal::MetalBackend &backend,
                  *weights.gate, *exactPlain);
       linear.add(graph, {buffers.input, fields[ReferenceUp], {}, {}, {}, {}},
                  weights.projection, *exactPlain);
-      (void)backend.submitCommand(graph.dispatches());
+      (void)backend.submitCommandAsync(graph.dispatches()).wait();
     };
     auto qualify = [&](size_t candidate, bool baseline) {
       requireFinite(buffers.output, false);

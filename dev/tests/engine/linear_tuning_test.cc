@@ -23,12 +23,8 @@ using splash::metal::BackendInstrumentation;
 using splash::test::deterministicQ4Projection;
 using splash::test::mix;
 
+using splash::test::rejects;
 using splash::test::require;
-template <class Function> void rejects(Function function) {
-  try { function(); }
-  catch (const std::invalid_argument &) { return; }
-  throw std::runtime_error("invalid Linear fixture accepted");
-}
 
 void cpuContracts() {
   DeviceCapabilities device;
@@ -55,7 +51,9 @@ void cpuContracts() {
                   "fixture misses a candidate workspace");
             auto denied = device;
             denied.maxBufferLengthBytes = bytes - 1;
-            rejects([&] { (void)linearTuningFixtureBytes(denied, workload); });
+            rejects([&] { (void)linearTuningFixtureBytes(denied, workload); },
+                    "Linear tuning fixture exceeds device buffer limit",
+                    "a fixture past the device's buffer limit was accepted");
             denied.maxBufferLengthBytes = bytes;
             require(linearTuningFixtureBytes(denied, workload) == bytes,
                     "exact admitted capacity rejected");
@@ -64,16 +62,26 @@ void cpuContracts() {
       }
     }
   }
+  for (const LinearMatrix matrix : {LinearMatrix{0, 256}, LinearMatrix{128, 256}})
+    rejects([&] { (void)linearTuningFixtureBytes(device, {matrix, 8}); }, "invalid linear matrix",
+            "a fixture of a matrix of no or partial column tiles was sized");
   for (const LinearWorkload workload : {
-       LinearWorkload{{0, 256}, 8}, LinearWorkload{{128, 256}, 8},
        LinearWorkload{{512, 64}, 8}, LinearWorkload{{512, 256}, 7},
        LinearWorkload{{512, 256}, 40},
-       LinearWorkload{{512, 256}, 8, LinearPhase::Decode, LinearEpilogue::UpWithGate},
+       LinearWorkload{{512, 256}, 8, LinearPhase::Decode, LinearEpilogue::UpWithGate}})
+    rejects([&] { (void)linearTuningFixtureBytes(device, workload); }, "invalid linear decode workload",
+            "a fixture of an invalid decode workload was sized");
+  for (const LinearWorkload workload : {
        LinearWorkload{{512, 256}, 8, LinearPhase::Prefill, LinearEpilogue::GateUp},
-       LinearWorkload{{512, 256}, 2049, LinearPhase::Prefill},
-       LinearWorkload{{512, 256}, 8, LinearPhase::Decode, LinearEpilogue::None,
-                      WeightLayout::Block32}})
-    rejects([&] { (void)linearTuningFixtureBytes(device, workload); });
+       LinearWorkload{{512, 256}, 2049, LinearPhase::Prefill}})
+    rejects([&] { (void)linearTuningFixtureBytes(device, workload); }, "invalid linear prefill workload",
+            "a fixture of an invalid prefill workload was sized");
+  rejects(
+      [&] {
+        (void)linearTuningFixtureBytes(
+            device, {{512, 256}, 8, LinearPhase::Decode, LinearEpilogue::None, WeightLayout::Block32});
+      },
+      "Linear tuning takes affine workloads", "a fixture of a block workload was sized");
   MeasurementOptions options;
   require(validMeasurementOptions(options), "default measurement options rejected");
   options.samplePairs = 11;
@@ -106,12 +114,14 @@ void blockInputs(metal::MetalBackend &backend, const Projection &projection) {
   const auto admit = [](uint64_t, const std::function<void()> &) -> metal::AllocationResult {
     throw std::logic_error("invalid tuning input reached admission");
   };
-  for (const LinearTuningInput &input : {LinearTuningInput{blocks, {{block, std::nullopt}}},
-                                         LinearTuningInput{affine, {{block, std::nullopt}}}}) {
+  for (const auto &[input, refusal] :
+       {std::pair{LinearTuningInput{blocks, {{block, std::nullopt}}}, "Linear tuning takes affine workloads"},
+        std::pair{LinearTuningInput{affine, {{block, std::nullopt}}}, "affine projection does not match plan"}}) {
     const auto result = tuneLinear(backend, admit, input);
     require(!result.complete && result.failure && result.measurements.empty(),
             "a block tuning input was accepted");
-    rejects([&] { std::rethrow_exception(result.failure); });
+    rejects([&] { std::rethrow_exception(result.failure); }, refusal,
+            "a block tuning input failed for another reason");
   }
   require(BackendInstrumentation::submittedCommands(backend) == before, "a block tuning input submitted GPU work");
 }
@@ -197,7 +207,7 @@ void gpuSweep(metal::MetalBackend &backend, std::span<const Projection> projecti
   bool mixed = false;
   for (const auto &plan : plans)
     mixed |= plan.configuration().splits != plans.front().configuration().splits ||
-        plan.usesSimdgroup() || plans.front().usesSimdgroup();
+        plan.usesQ4Register() || plans.front().usesQ4Register();
   const uint64_t referenceSubmissions =
       mixed && epilogue == LinearEpilogue::GateUp ? projections.size() : 0;
   const uint64_t before = BackendInstrumentation::submittedCommands(backend);
@@ -381,7 +391,7 @@ void gpuBatchEquivalence(metal::MetalBackend &backend,
       linear.add(graph, buffers, projection, plan,
           epilogue == LinearEpilogue::GateUp ? &projection : nullptr);
     }
-    const auto timing = backend.submitCommand(graph.dispatches());
+    const auto timing = backend.submitCommandAsync(graph.dispatches()).wait();
     return RunTiming{timing.gpuSeconds,
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(), false};
   };
@@ -467,13 +477,13 @@ int main(int argc, char **argv) {
     for (uint32_t rows : {8U, 16U, 24U, 32U})
       gpuSweep(backend, gate, rows, LinearPhase::Decode, LinearEpilogue::GateUp);
     // Four 256-input blocks of K list Split128 at two and four K splits on
-    // Apple10 and later, and Apple9's baseline is its simdgroup tile, so
+    // Apple10 and later, and Apple9's baseline is its Q4 register tile, so
     // these sweeps hold outputs to the derived bound as well as bitwise.
     std::array split{deterministicQ4Projection(backend, {512, 1024}, 29),
                      deterministicQ4Projection(backend, {512, 1024}, 131)};
     bool mixedClasses = false;
     for (const auto &plan : linearCandidates(backend.capabilities(), {{512, 1024}, 8}))
-      mixedClasses |= plan.configuration().splits > 1 || plan.usesSimdgroup();
+      mixedClasses |= plan.configuration().splits > 1 || plan.usesQ4Register();
     require(mixedClasses, "no candidate of a four-block K workload splits K");
     for (const auto epilogue : {LinearEpilogue::None, LinearEpilogue::Residual,
                                LinearEpilogue::GateUp})

@@ -50,7 +50,7 @@ struct ImagePlan final {
 // contentIdentity, what the sources hold (ModelDescriptor::sourceIdentity).
 class WeightImages final : public WeightMemory {
 public:
-  explicit WeightImages(metal::MetalBackend &backend, std::string contentIdentity = {}) noexcept
+  WeightImages(metal::MetalBackend &backend, std::string contentIdentity) noexcept
       : backend_(&backend), contentIdentity_(std::move(contentIdentity)) {}
   WeightImages(const WeightImages &) = delete;
   WeightImages &operator=(const WeightImages &) = delete;
@@ -83,9 +83,9 @@ private:
   size_t restored_ = 0;
 };
 
-// The image of a Splash package's packed file at path, read as it is.
-[[nodiscard]] ImagePlan packedImage(const std::filesystem::path &path, std::string component,
-                                    std::string_view magic, uint32_t layer, uint32_t type);
+// The image of a Splash package's file at path, read as it is.
+[[nodiscard]] ImagePlan packageImage(const std::filesystem::path &path, std::string component,
+                                     std::string_view magic, uint32_t layer, uint32_t type);
 
 // The threads that read and convert weights while images are written: one
 // per core.

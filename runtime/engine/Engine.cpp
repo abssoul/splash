@@ -1,5 +1,4 @@
 #include "engine/Engine.hpp"
-#include "TestConfig.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -10,7 +9,15 @@
 namespace splash::engine {
 namespace {
 
+// A request refused memory retries at once when the engine frees some
+// (signalResourceProgress). Memory that comes back without that, as the
+// host's does, it finds by retrying this often: at most a tenth of a second
+// later, without spinning the loop on attempts.
 constexpr double kResourceRetryBackoffMilliseconds = 100.0;
+// While a command is in flight the loop wakes at least this often to run the
+// command watchdog (Model::checkHealth), so a command the backend gives up on
+// fails the engine within a second of its timeout, as a ticket's own wait
+// finds it (MetalBackend.mm kTicketWaitSlice).
 constexpr double kHealthCheckIntervalMilliseconds = 1000.0;
 // A mask request the server leaves unanswered this long fails its request;
 // the batch's command slot is not held longer.
@@ -24,7 +31,7 @@ constexpr uint32_t kMinimumJunctionGain = model::ExecutionLimits::draftContextTo
 class Serving final {
 public:
   Serving(const std::function<void(bool)> &mark, bool active)
-      : mark_(active && mark ? &mark : nullptr) {
+      : mark_(active ? &mark : nullptr) {
     if (mark_)
       (*mark_)(true);
   }
@@ -65,15 +72,13 @@ std::string pageShortfall(const TokenAdmission &admission) {
 
 Engine::Engine(EngineConfig config, Cache &cache, model::Model &model,
                EngineEventSink &events)
-    : config_(config),
-      checkpointTokens_(testConfig().prefillCheckpointTokens.value_or(kPrefillCheckpointTokens)),
-      resourceWaitTimeoutMilliseconds_(
-          testConfig().resourceWaitTimeoutMilliseconds.value_or(kResourceWaitTimeoutMilliseconds)),
-      cache_(cache), writeBehind_(cache), model_(model), events_(events),
-      scheduler_(config_.decodeShare) {
+    : config_(config), cache_(cache), writeBehind_(cache), model_(model),
+      events_(events), scheduler_(config_.decodeShare) {
   if (!config_.maxContext || !config_.vocabularySize) {
     throw std::invalid_argument("context and vocabulary sizes must be positive");
   }
+  if (!config_.growthPaused || !config_.serving)
+    throw std::invalid_argument("the engine needs the governor's growth pause and serving mark");
   if (!std::isfinite(config_.decodeShare) || config_.decodeShare < 0.0)
     throw std::invalid_argument("decode share must be nonnegative and finite");
   scheduler_.boundIsolatedPrefill(config_.prefillCommandMilliseconds);
@@ -308,7 +313,7 @@ bool Engine::drainingForRecovery() const {
                      [](const auto &entry) {
                        return entry.second.lane.has_value();
                      }) &&
-         (allocationFailed_ || growthPaused());
+         (allocationFailed_ || config_.growthPaused());
 }
 
 std::optional<RequestPriority> Engine::suspendedTier() const {
@@ -328,6 +333,13 @@ bool Engine::admissionTries(const Request &active, std::optional<RequestPriority
     return !draining;
   return active.request.priority < *tier ||
          (scheduler_.suspended(active.request.id) && !draining);
+}
+
+bool Engine::holdsBack(std::optional<uint64_t> refused) const {
+  if (!refused)
+    return false;
+  const auto found = requests_.find(*refused);
+  return found != requests_.end() && !found->second.finalized && found->second.refusedMemory;
 }
 
 std::optional<double> Engine::nextWakeupMilliseconds() const {
@@ -391,7 +403,13 @@ ResourceWaitSnapshot Engine::resourceWaitSnapshot(double now) const {
       ++result.restoring;
       continue;
     }
-    if (scheduler_.phase(id) != Phase::WaitingResources)
+    const bool waiting = scheduler_.phase(id) == Phase::WaitingResources;
+    // What the latest admission pass held back, in whatever phase it left
+    // them, while the request they wait behind is still refused, and a
+    // request refused memory while a pass keeps it out of its memory wait.
+    if (holdsBack(active.heldBehind) || (active.refusedMemory && !waiting))
+      ++result.heldBehindRefusal;
+    if (!waiting)
       continue;
     if (active.resourceWait.reason == StateFailure::ConcurrencyLimit)
       ++result.concurrency;
@@ -402,21 +420,6 @@ ResourceWaitSnapshot Engine::resourceWaitSnapshot(double now) const {
     if (active.resourceWait.startedMilliseconds)
       result.oldestWaitMilliseconds = std::max(
           result.oldestWaitMilliseconds, now - *active.resourceWait.startedMilliseconds);
-  }
-  // As admitQueued tries them: the requests after the first one refused
-  // memory are held back behind it, in whatever phase the latest pass left
-  // them, and so is that request while a pass defers it for scheduling or a
-  // prefix. During recovery only the suspended requests and those above all
-  // of them are tried.
-  const std::optional<RequestPriority> tier = suspendedTier();
-  bool closed = false;
-  for (uint64_t id : scheduler_.admissionOrder()) {
-    const Request &held = requests_.at(id);
-    if (held.finalized || held.restore || !admissionTries(held, tier, false))
-      continue;
-    if (closed || (held.refusedMemory && scheduler_.phase(id) != Phase::WaitingResources))
-      ++result.heldBehindRefusal;
-    closed = closed || held.refusedMemory;
   }
   return result;
 }
@@ -437,10 +440,17 @@ bool Engine::admitQueued(double now) {
   const bool draining = drainingForRecovery();
   const std::vector<uint64_t> order = scheduler_.admissionOrder();
   // A request this pass does not start, or that waits behind one refused
-  // memory, waits for scheduling.
+  // memory, waits for scheduling; the latter is marked with the refused
+  // request until the next pass.
+  for (auto &[_, active] : requests_)
+    active.heldBehind.reset();
   const auto queue = [&](uint64_t id) {
     deferWait(request(id));
     scheduler_.deferAdmission(id);
+  };
+  const auto hold = [&](uint64_t id, uint64_t refused) {
+    queue(id);
+    request(id).heldBehind = refused;
   };
   // A request below the highest priority that prefills or decodes cannot
   // run before that priority is done. It waits for scheduling, unprobed, and
@@ -493,14 +503,15 @@ bool Engine::admitQueued(double now) {
     // refused memory holds back the ones after it. Those are not tried, so
     // they keep no retry time, and their wait limit starts again at their
     // next attempt.
-    bool held = false;
+    std::optional<uint64_t> refused;
     for (uint64_t id : order) {
       Request &active = request(id);
       if (active.restore || !admissionTries(active, tier, draining))
         continue;
-      if (held) {
+      if (refused) {
         active.resourceWait.retryMilliseconds = 0.0;
         active.resourceWait.deadlineMilliseconds = 0.0;
+        active.heldBehind = refused;
         continue;
       }
       if (resourceRetryReady(active, now)) {
@@ -510,7 +521,8 @@ bool Engine::admitQueued(double now) {
         else if (lanesFull && !suspended ? waitForLane(id, active) : admit(active, now))
           return true;
       }
-      held = active.refusedMemory;
+      if (active.refusedMemory)
+        refused = id;
     }
     return false;
   }
@@ -530,7 +542,7 @@ bool Engine::admitQueued(double now) {
     Request &active = request(id);
     if (index >= open) {
       if (!active.restore)
-        queue(id);
+        hold(id, order[open - 1]);
       continue;
     }
     if (active.refusedMemory)
@@ -574,7 +586,7 @@ bool Engine::admitQueued(double now) {
     std::erase_if(candidates, [&](const auto &value) {
       if (positions.at(value.requestId) < open)
         return false;
-      queue(value.requestId);
+      hold(value.requestId, order[open - 1]);
       return true;
     });
     // A request that could not start holds back only what arrived after it.
@@ -895,7 +907,7 @@ void Engine::deferResourceRetry(Request &active, double now,
   if (reason == StateFailure::ConcurrencyLimit)
     wait.deadlineMilliseconds = 0.0;
   else if (progressed || wait.deadlineMilliseconds <= 0.0)
-    wait.deadlineMilliseconds = now + resourceWaitTimeoutMilliseconds_;
+    wait.deadlineMilliseconds = now + config_.resourceWaitTimeoutMilliseconds;
   wait.epoch = resourceEpoch_;
   wait.retryMilliseconds = now + kResourceRetryBackoffMilliseconds;
 }
@@ -918,7 +930,7 @@ double Engine::resourceDeadline(const Request &active) const noexcept {
   // that takes. Other lanes do not extend it: requests that keep arriving
   // would otherwise hold it until the request's deadline.
   return std::max(wait.deadlineMilliseconds,
-                  wait.earlierLaneWorkMilliseconds + resourceWaitTimeoutMilliseconds_);
+                  wait.earlierLaneWorkMilliseconds + config_.resourceWaitTimeoutMilliseconds);
 }
 
 void Engine::signalResourceProgress() noexcept {
@@ -937,7 +949,7 @@ DraftContextPlan Engine::configureDraftStatePlan(Request &active,
   // Plan draft windows before prefill; arbitrary chunk ends do not carry a
   // complete draft state. Progress points remain disposable after restoration.
   for (const uint32_t checkpoint : plannedCheckpoints(
-           stateBoundary, latestReplayBoundary, checkpointTokens_)) {
+           stateBoundary, latestReplayBoundary, config_.prefillCheckpointTokens)) {
     addStateBoundary(active, stateBoundary, checkpoint, true);
   }
   if (junctionBoundary >= stateBoundary + kMinimumJunctionGain)
@@ -1010,20 +1022,20 @@ void Engine::discardPendingStateBoundaries(Request &active) noexcept {
   active.stateBoundaryCursor = 0;
 }
 
+bool Engine::checkpointShared(const Request &active) const {
+  const auto point = active.latestCheckpoint;
+  return point && std::any_of(requests_.begin(), requests_.end(), [&](const auto &entry) {
+           const auto &peer = entry.second;
+           return &peer != &active && !peer.finalized &&
+                  peer.latestCheckpoint.kvBlock == point.kvBlock &&
+                  peer.latestCheckpoint.publication == point.publication;
+         });
+}
+
 bool Engine::retireCheckpoint(Request &active) {
   // Shared progress points remain disposable under memory pressure, but a
   // lane's normal rolling replacement must not retire its peer's recovery point.
-  const auto point = active.latestCheckpoint;
-  if (point && std::any_of(requests_.begin(), requests_.end(), [&](const auto &entry) {
-        const auto &peer = entry.second;
-        return &peer != &active && !peer.finalized &&
-               peer.latestCheckpoint.kvBlock == point.kvBlock &&
-               peer.latestCheckpoint.publication == point.publication;
-      })) {
-    active.latestCheckpoint = {};
-    return true;
-  }
-  if (!cache_.retireCheckpointState(active.latestCheckpoint))
+  if (!checkpointShared(active) && !cache_.retireCheckpointState(active.latestCheckpoint))
     return false;
   active.latestCheckpoint = {};
   return true;
@@ -1068,13 +1080,19 @@ void Engine::publishReachedStateBoundaries(Request &active,
       // can delay this optional publication. A checkpoint only on disk
       // frees no cache slot for an ordinary state, so it stays the recovery
       // point until that state is published; it retires after the
-      // publication, as does the one a reused state leaves.
-      if ((checkpoint || cache_.stateResident(active.latestCheckpoint.kvBlock)) &&
-          !retireCheckpoint(active) && checkpoint) {
+      // publication, as does the one a reused state leaves. The prompt's
+      // replay point keeps the lane's checkpoint (below) only beside a
+      // snapshot that fits: refused room, it hands a resident one's buffers
+      // to the snapshot before making room, unless a peer still holds it.
+      const bool resident = cache_.stateResident(active.latestCheckpoint.kvBlock);
+      if ((checkpoint || (!replay && resident)) && !retireCheckpoint(active) && checkpoint) {
         ++failures;
         continue;
       }
       std::shared_ptr<const CompositeState> state = model_.snapshot(active.request.id);
+      if (!state && replay && resident && !checkpointShared(active) &&
+          retireCheckpoint(active))
+        state = model_.snapshot(active.request.id);
       // Room comes from what this publication's class may take: cached KV
       // unless it is an optional checkpoint, and states in use only for a
       // block in use. A state in use is never dropped for a busy write
@@ -1086,7 +1104,7 @@ void Engine::publishReachedStateBoundaries(Request &active,
       // more of the class goes, or the extents given cover one snapshot:
       // a denial after that is not the budget's.
       if (!state) {
-        const bool growth = !growthPaused();
+        const bool growth = !config_.growthPaused();
         const uint64_t needed = model_.snapshotBytes();
         uint64_t released = 0;
         StateRoom room;
@@ -1120,8 +1138,14 @@ void Engine::publishReachedStateBoundaries(Request &active,
         continue;
       }
     }
-    // The previous recovery point, if the lane still holds one, retires now.
-    static_cast<void>(retireCheckpoint(active));
+    // The previous recovery point, if the lane still holds one, retires now,
+    // except at the prompt's replay point: there it stays cached, as
+    // disposable as any checkpoint, for a later request that shares the
+    // prompt up to it but not up to the replay point. The lane holds it
+    // until this state is published; a refused publication leaves it the
+    // lane's recovery point, unless it gave the snapshot its buffers.
+    if (!replay)
+      static_cast<void>(retireCheckpoint(active));
     active.latestCheckpoint = checkpoint ? cache_.checkpointState(block)
                                          : StateCheckpoint{};
     if (!checkpoint)
@@ -1358,10 +1382,6 @@ auto Engine::allocate(Attempt &&attempt, bool inService, ReclaimClass upTo,
   return result;
 }
 
-bool Engine::growthPaused() const {
-  return config_.growthPaused && config_.growthPaused();
-}
-
 // The reclaim step for a lane's state the engine's limit refused. The pooled
 // buffers a lane starts from stay for its activation to take: idle model
 // memory beyond them goes first (a pooled buffer, else the idle vision
@@ -1467,7 +1487,7 @@ void Engine::suspendForGrowth(Request &active, uint64_t workEnd,
   // Resident lanes drain before admission resumes. Growth the host refused
   // resumes when its pressure lifts; any other limit only once memory is
   // freed, so it counts as a failure the drain waits out.
-  drainEndMilliseconds_ = now + resourceWaitTimeoutMilliseconds_;
+  drainEndMilliseconds_ = now + config_.resourceWaitTimeoutMilliseconds;
   allocationFailed_ = failure != metal::AllocationFailure::HostPressure;
   ++counters_.resourceSuspensions;
 }

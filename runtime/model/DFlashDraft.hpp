@@ -50,19 +50,21 @@ private:
   uint64_t actualAllocatedBytes_ = 0;
 };
 
+// The dimensions of a DFlash2 draft. Each target's draft is defined beside
+// the target (Qwen3_8.hpp, Qwen3_6Moe.hpp).
 struct DFlashDraftLayout final {
-  uint32_t layers = 5;
-  uint32_t hiddenSize = 5120;
-  uint32_t vocabularySize = 248320;
-  uint32_t dynamicSize = 1280;
-  uint32_t qkvSize = 6144;
-  uint32_t attentionSize = 4096;
-  uint32_t intermediateSize = 17408;
-  uint32_t attentionHeadDimension = 128;
-  float rotaryTheta = 10'000'000.0F;
-  uint32_t targetHiddenSize = 25600;
-  uint32_t selectorRank = 256;
-  uint32_t kvHeads = 8;
+  uint32_t layers = 0;
+  uint32_t hiddenSize = 0;
+  uint32_t vocabularySize = 0;
+  uint32_t dynamicSize = 0;
+  uint32_t qkvSize = 0;
+  uint32_t attentionSize = 0;
+  uint32_t intermediateSize = 0;
+  uint32_t attentionHeadDimension = 0;
+  float rotaryTheta = 0.0F;
+  uint32_t targetHiddenSize = 0;
+  uint32_t selectorRank = 0;
+  uint32_t kvHeads = 0;
 
   [[nodiscard]] constexpr DraftStateLayout stateLayout() const noexcept {
     return {layers, kvHeads, attentionHeadDimension};
@@ -170,7 +172,7 @@ struct DFlashDraftWeights final {
 inline constexpr std::string_view kDFlashLayerMagic = "MDFD0004";
 
 // A Splash package's draft files: layer-<N>.bin and model.bin.
-struct PackedDraftFiles final {
+struct PackageDraftFiles final {
   WeightImages &images;
   std::filesystem::path directory;
   const DFlashDraftLayout &layout;
@@ -180,16 +182,16 @@ struct PackedDraftFiles final {
 
 class DraftCheckpointLoader;
 
-// The files a draft is read from: a package's packed files, or the images
+// The files a draft is read from: a package's files, or the images
 // DraftCheckpointLoader writes from a DFlash2 checkpoint.
-using DraftFiles = std::variant<PackedDraftFiles, std::reference_wrapper<DraftCheckpointLoader>>;
+using DraftFiles = std::variant<PackageDraftFiles, std::reference_wrapper<DraftCheckpointLoader>>;
 
 [[nodiscard]] DFlashDraftWeights
 loadDFlashDraftWeights(metal::MetalBackend &backend, const DraftFiles &files,
                        DFlashDraftLayout layout);
 
 // Builds the draft layer graph and its proposal selection
-// (ops::DraftSelector) from packed buffers and persistent context; the
+// (ops::DraftSelector) from batch buffers and persistent context; the
 // target's sampling and acceptance policy remain outside the model.
 class DFlashDraft final {
 public:

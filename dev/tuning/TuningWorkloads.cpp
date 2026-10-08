@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <map>
 #include <stdexcept>
+#include <type_traits>
 
 namespace splash::model {
 namespace {
@@ -47,7 +48,7 @@ void retainRepresentatives(std::vector<LinearTuningWeights> &weights) {
 } // namespace
 
 std::vector<LinearTuningInput> collectTuningWorkloads(
-    const ModelPackage &package, std::span<const uint32_t> prefillRows,
+    const LoadedModel &model, std::span<const uint32_t> prefillRows,
     std::span<const uint32_t> decodeWidths) {
   using ops::LinearEpilogue;
   using ops::LinearPhase;
@@ -92,7 +93,7 @@ std::vector<LinearTuningInput> collectTuningWorkloads(
         bothPhases(mixer.inputProjection);
         bothPhases(mixer.outputProjection, LinearEpilogue::Residual);
       }, layer.mixer);
-      if constexpr (decltype(target.layout)::ffnKind == QwenFfnKind::Dense) {
+      if constexpr (std::is_same_v<std::remove_cvref_t<decltype(layer)>, Qwen3_8LayerWeights>) {
         projection(layer.gateProjection, LinearPhase::Prefill,
                      LinearEpilogue::None);
         projection(layer.upProjection, LinearPhase::Prefill,
@@ -104,9 +105,9 @@ std::vector<LinearTuningInput> collectTuningWorkloads(
     }
     projection(target.logitsProjection, LinearPhase::Decode,
                  LinearEpilogue::None);
-  }, package.target);
+  }, model.target);
 
-  const auto &draft = package.draft;
+  const auto &draft = model.draft;
   if (draft.layers.empty())
     throw std::invalid_argument("operator probes require draft layers");
   bothPhases(draft.contextProjection);

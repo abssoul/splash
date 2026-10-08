@@ -9,7 +9,11 @@ VENV := .venv
 PYTHON = $(VENV)/bin/python
 # Holds the hash of the requirements the environment was last installed from.
 VENV_STAMP = $(VENV)/.requirements-installed
+# Held while the environment is set up. lockf waits for it without a word, so
+# each wait for it is announced first.
 INSTALL_LOCK = $(VENV).install.lock
+ANNOUNCE_INSTALL_WAIT = /usr/bin/lockf -s -k -t 0 "$(INSTALL_LOCK)" true \
+	|| echo "Another setup of $(VENV) is running; waiting..."
 REQUIREMENTS := install/requirements.txt
 PYTHON_CANDIDATES ?= python3.13 python3 python3.12 python3.14
 BUILD_ID_PYTHON ?= python3
@@ -60,17 +64,17 @@ ENGINE_CXXFLAGS := -std=c++20 -O3 -Wall -Wextra -Werror -Iruntime \
 	$(MACOS_TARGET_FLAG)
 ENGINE_OBJCXXFLAGS := $(ENGINE_CXXFLAGS) -fobjc-arc
 LIB := $(BUILD)/splash.metallib
-.PHONY: all clean force-build-identity install _install \
+.PHONY: all clean force-build-identity install \
 	install-environment _install-environment \
-	platform-check model-selection preflight serve
+	platform-check model-selection preflight
 
 all: $(TARGET)
 
-install: model-selection platform-check
-	@/usr/bin/lockf -k "$(INSTALL_LOCK)" $(MAKE) --no-print-directory \
-		-f "$(SPLASH_MAKEFILE)" _install
-
-_install: model-selection _install-environment
+# The installer checks a model's configuration with the engine (build/splash
+# model-check) before it downloads any weight. It takes the models' own lock
+# for what it writes; the download holds up no other setup of the
+# environment.
+install: model-selection platform-check install-environment $(TARGET)
 	$(MODEL_INSTALL) prepare
 
 model-selection:
@@ -100,6 +104,7 @@ platform-check:
 	done
 
 install-environment:
+	@$(ANNOUNCE_INSTALL_WAIT)
 	@/usr/bin/lockf -k "$(INSTALL_LOCK)" $(MAKE) --no-print-directory \
 		-f "$(SPLASH_MAKEFILE)" _install-environment
 
@@ -167,9 +172,6 @@ preflight: model-selection
 	@$(PYTHON) -m pip check >/dev/null
 	@TRANSFORMERS_VERBOSITY=error $(PYTHON) -c 'import server.server'
 
-serve: preflight $(TARGET)
-	./splash serve $(MODEL_ARGS)
-
 $(BUILD):
 	mkdir -p $(BUILD)
 
@@ -186,7 +188,8 @@ $(LIB): $(PRODUCTION_AIRS)
 
 ENGINE_BUILD := $(BUILD)/engine
 ENGINE_LIBRARY := $(ENGINE_BUILD)/libsplash.a
-ENGINE_LINKFLAGS := -framework Foundation -framework Metal -framework IOKit
+ENGINE_LINKFLAGS := -framework Foundation -framework Metal -framework IOKit \
+	-framework IOSurface
 ENGINE_DEPFLAGS := -MMD -MP
 # Configuration belongs to each successful output, not to a shared timestamp:
 # macOS make can treat a new stamp and an old binary in the same second as equal.
@@ -222,7 +225,13 @@ ENGINE_METAL_RUNTIME_OBJECT := $(ENGINE_BUILD)/metal/MetalBackend.o
 # Only tests and benchmarks link it, ahead of the engine library, whose own
 # MetalBackend object the linker then never pulls.
 ENGINE_INSTRUMENTED_METAL_OBJECT := $(ENGINE_BUILD)/metal/MetalBackendInstrumented.o
+# Program with the fault seam ane/ProgramInstrumentation.hpp declares, linked
+# the same way.
+ENGINE_INSTRUMENTED_ANE_OBJECT := $(ENGINE_BUILD)/ane/ProgramInstrumented.o
 ENGINE_CPP_SOURCES := \
+	runtime/ops/AneFfn.cpp \
+	runtime/ops/AneFfnCalibration.cpp \
+	runtime/ops/AneFfnMeasurement.cpp \
 	runtime/ops/DraftAttention.cpp \
 	runtime/ops/DraftSelector.cpp \
 	runtime/ops/Embedding.cpp \
@@ -233,11 +242,14 @@ ENGINE_CPP_SOURCES := \
 	runtime/ops/MoE.cpp \
 	runtime/ops/Normalization.cpp \
 	runtime/ops/PagedAttention.cpp \
+	runtime/ops/PageStorage.cpp \
 	runtime/ops/RoPE.cpp \
 	runtime/ops/RowCopy.cpp \
 	runtime/ops/Sampling.cpp \
+	runtime/ops/Vision.cpp \
 	runtime/metal/DeviceCapabilities.cpp \
 	runtime/engine/MemoryPlan.cpp \
+	runtime/engine/AneFfnStartup.cpp \
 	runtime/engine/Scheduler.cpp \
 	runtime/engine/Cache.cpp \
 	runtime/engine/WriteBehind.cpp \
@@ -252,6 +264,7 @@ ENGINE_CPP_SOURCES := \
 	runtime/model/DraftContextPlan.cpp \
 	runtime/engine/Protocol.cpp \
 	runtime/engine/NativeRuntime.cpp \
+	runtime/engine/NativeArguments.cpp \
 	runtime/engine/FdTransport.cpp \
 	runtime/engine/MemoryAudit.cpp \
 	runtime/engine/Status.cpp \
@@ -275,14 +288,14 @@ ENGINE_CPP_SOURCES := \
 	runtime/model/DFlashDraft.cpp \
 	runtime/model/ModelFactory.cpp \
 	runtime/model/SlotFile.cpp \
-	runtime/model/QwenState.cpp
+	runtime/model/QwenState.cpp \
+	runtime/model/Runtime.cpp \
+	runtime/model/RuntimeArenas.cpp
 ENGINE_MM_SOURCES := \
+	runtime/ane/Handoff.mm \
+	runtime/ane/Program.mm \
 	runtime/model/SafetensorsCheckpoint.mm \
 	runtime/model/ModelDescriptor.mm \
-	runtime/model/Runtime.mm \
-	runtime/model/RuntimeArenas.mm \
-	runtime/ops/Vision.mm \
-	runtime/ops/PageStorage.mm \
 	runtime/engine/RuntimeResources.mm \
 	runtime/engine/Bootstrap.mm
 ENGINE_OBJECTS := \
@@ -290,10 +303,10 @@ ENGINE_OBJECTS := \
 	$(patsubst runtime/%.mm,$(ENGINE_BUILD)/%.o,$(ENGINE_MM_SOURCES)) \
 	$(ENGINE_METAL_RUNTIME_OBJECT)
 PRODUCTION_CONFIG_TARGETS := $(ENGINE_OBJECTS) $(ENGINE_MAIN_OBJECT) \
-	$(ENGINE_INSTRUMENTED_METAL_OBJECT) $(ENGINE_LIBRARY) $(PRODUCTION_AIRS) \
-	$(LIB) $(TARGET)
+	$(ENGINE_INSTRUMENTED_METAL_OBJECT) $(ENGINE_INSTRUMENTED_ANE_OBJECT) \
+	$(ENGINE_LIBRARY) $(PRODUCTION_AIRS) $(LIB) $(TARGET)
 ENGINE_DEPFILES := $(ENGINE_OBJECTS:.o=.d) $(ENGINE_MAIN_OBJECT:.o=.d) \
-	$(ENGINE_INSTRUMENTED_METAL_OBJECT:.o=.d)
+	$(ENGINE_INSTRUMENTED_METAL_OBJECT:.o=.d) $(ENGINE_INSTRUMENTED_ANE_OBJECT:.o=.d)
 
 -include $(ENGINE_DEPFILES)
 
@@ -326,6 +339,11 @@ $(ENGINE_INSTRUMENTED_METAL_OBJECT): runtime/metal/MetalBackend.mm
 	@mkdir -p $(dir $@)
 	$(RUN_CONFIGURED) $(CXX) $(ENGINE_OBJCXXFLAGS) $(ENGINE_DEPFLAGS) \
 		-DSPLASH_BACKEND_INSTRUMENTATION=1 -c $< -o $@
+
+$(ENGINE_INSTRUMENTED_ANE_OBJECT): runtime/ane/Program.mm
+	@mkdir -p $(dir $@)
+	$(RUN_CONFIGURED) $(CXX) $(ENGINE_OBJCXXFLAGS) $(ENGINE_DEPFLAGS) \
+		-DSPLASH_ANE_INSTRUMENTATION=1 -c $< -o $@
 
 $(ENGINE_MAIN_OBJECT): runtime/main.mm $(BUILD_ID_HEADER)
 	@mkdir -p $(dir $@)

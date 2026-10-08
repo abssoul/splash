@@ -169,13 +169,14 @@ int timing(MetalBackend &backend, uint32_t rounds, Fmt gateUpFormat, Fmt downFor
     MoE::add(graph, b, weights, plan);
     std::vector<double> samples;
     for (uint32_t i = 0; i < rounds + 1; ++i) {
-      const double seconds = backend.submitCommand(graph.dispatches()).gpuSeconds;
+      const double seconds = backend.submitCommandAsync(graph.dispatches()).wait().gpuSeconds;
       if (i) samples.push_back(seconds * 1e3);   // the first round warms the pipelines
     }
     std::sort(samples.begin(), samples.end());
     return samples[samples.size() / 2];
   };
-  const MoeGgufTile device = splash::ops::moeGgufTile(backend.capabilities().appleGpuFamily, ggufShape);
+  const MoeGgufTile device =
+      splash::ops::moeGgufTile(splash::ops::gpuFamilyClass(backend.capabilities().appleGpuFamily), ggufShape);
   const MoeGgufTile other = device == MoeGgufTile::Register ? MoeGgufTile::Staged : MoeGgufTile::Register;
   printf("%s, GPU family %u, %u cores: median GPU ms per MoE layer of %u rounds\n",
          backend.capabilities().deviceName.c_str(), backend.capabilities().appleGpuFamily,

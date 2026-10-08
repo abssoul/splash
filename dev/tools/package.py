@@ -56,6 +56,7 @@ SERVER_FILES = (
     "tool_schema.py",
     "tokenization.py",
     "json_codec.py",
+    "lru.py",
     "latency.py",
     "metrics.py",
     "errors.py",
@@ -65,6 +66,7 @@ SERVER_FILES = (
     "documents.py",
     "document_worker.py",
     "http_security.py",
+    "connections.py",
     "origins.py",
     "serve_options.py",
     "thinking.py",
@@ -152,7 +154,7 @@ class Splash < Formula
   def caveats
     <<~CAVEAT
       Serve a model:
-        splash serve --model mlx-community/Qwen3.8-27B-4bit
+        splash serve --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
     CAVEAT
   end
 
@@ -239,8 +241,8 @@ def main(argv=None):
             cwd=stage,
             check=True,
         )
-        packed = Path(temporary) / archive.name
-        with tarfile.open(packed, "w:gz") as release:
+        temporary_archive = Path(temporary) / archive.name
+        with tarfile.open(temporary_archive, "w:gz") as release:
             release.add(
                 stage,
                 arcname=name,
@@ -248,7 +250,7 @@ def main(argv=None):
                     None if "__pycache__" in Path(item.name).parts else item
                 ),
             )
-        packed.replace(archive)
+        temporary_archive.replace(archive)
     checksum = digest(archive)
     archive.with_suffix(archive.suffix + ".sha256").write_text(checksum + "\n")
     url = (

@@ -3,6 +3,7 @@
 #include "model/DraftCheckpoint.hpp"
 #include "model/GgufTarget.hpp"
 #include "model/QwenTargetLoader.hpp"
+#include "model/VisionLoader.hpp"
 
 #include <functional>
 #include <limits>
@@ -13,19 +14,34 @@
 
 namespace splash::model {
 
-void requireCompatibleModelPackage(const ModelPackage &package) {
-  if (!package.descriptor.valid() ||
-      package.descriptor.draft != package.draft.layout ||
+void requireCompatibleModel(const LoadedModel &model) {
+  if (!model.descriptor.valid() ||
+      model.descriptor.draft != model.draft.layout ||
       !std::visit(
           [&](const auto &target) {
-            return package.descriptor.target == TargetLayout{target.layout} &&
+            return model.descriptor.target == TargetLayout{target.layout} &&
                    target.layout.vocabularySize ==
-                       package.draft.layout.vocabularySize;
+                       model.draft.layout.vocabularySize;
           },
-          package.target)) {
+          model.target)) {
     throw std::invalid_argument(
         "target and draft model interfaces are incompatible");
   }
+}
+
+std::unique_ptr<VisionLoader> planVisionLoader(const std::filesystem::path &root, const ModelDescriptor &descriptor) {
+  if (descriptor.visionSource != VisionSource::Mlx && descriptor.visionSource != VisionSource::Gguf)
+    return nullptr;
+  return std::make_unique<VisionLoader>(root / "vision", descriptor.visionSource, descriptor.vision);
+}
+
+QwenVisionWeights loadVisionWeights(metal::MetalBackend &backend, WeightImages &images,
+                                    const std::filesystem::path &root, const ModelDescriptor &descriptor,
+                                    const VisionLoader *loader) {
+  if (loader) return loadQwenVisionWeights(backend, images, *loader);
+  if (descriptor.visionSource == VisionSource::Package)
+    return loadQwenVisionWeights(backend, images, root / "vision", descriptor.vision);
+  return {};
 }
 
 namespace {
@@ -48,10 +64,10 @@ template <class Image> uint64_t imageBytes(const std::vector<Image> &images) {
 
 } // namespace
 
-ModelPackage loadModelPackage(metal::MetalBackend &backend,
+LoadedModel loadModel(metal::MetalBackend &backend,
                               const std::filesystem::path &root,
                               const ModelDescriptor &descriptor) {
-  ModelPackage result;
+  LoadedModel result;
   result.descriptor = descriptor;
   if (!result.descriptor.valid())
     throw std::invalid_argument("model descriptor is invalid");
@@ -68,14 +84,14 @@ ModelPackage loadModelPackage(metal::MetalBackend &backend,
         using Layout = std::remove_cvref_t<decltype(layout)>;
         const std::filesystem::path directory = root / "target";
         switch (result.descriptor.targetSource) {
-        case TargetSource::Packed:
-          return readTarget(backend, layout, PackedTargetFiles<Layout>{images, directory, layout});
+        case TargetSource::Package:
+          return readTarget(backend, layout, PackageTargetFiles<Layout>{images, directory, layout});
         case TargetSource::Mlx: {
           AffineTargetLoader loader(images, directory, layout);
           return readTarget(backend, layout, std::ref(loader));
         }
         case TargetSource::Gguf: {
-          GgufTargetLoader loader(backend, images, findTargetGguf(directory), ggufTargetGeometry(layout));
+          GgufTargetLoader loader(backend, images, findTargetGguf(directory), layout);
           return readTarget(backend, layout, std::ref(loader));
         }
         }
@@ -85,7 +101,7 @@ ModelPackage loadModelPackage(metal::MetalBackend &backend,
   result.draft = loadDFlashDraftWeights(
       backend,
       draft ? DraftFiles(std::ref(*draft))
-            : DraftFiles(PackedDraftFiles{images, root / "draft", result.descriptor.draft}),
+            : DraftFiles(PackageDraftFiles{images, root / "draft", result.descriptor.draft}),
       result.descriptor.draft);
   result.vision = loadVisionWeights(backend, images, root, result.descriptor, vision.get());
 
@@ -96,23 +112,8 @@ ModelPackage loadModelPackage(metal::MetalBackend &backend,
   records.insert(records.end(), result.vision.files.begin(),
                  result.vision.files.end());
   result.manifestFingerprintSha256 = weightManifestFingerprint(records);
-  requireCompatibleModelPackage(result);
+  requireCompatibleModel(result);
   return result;
-}
-
-std::unique_ptr<VisionLoader> planVisionLoader(const std::filesystem::path &root, const ModelDescriptor &descriptor) {
-  if (descriptor.visionSource != VisionSource::Mlx && descriptor.visionSource != VisionSource::Gguf)
-    return nullptr;
-  return std::make_unique<VisionLoader>(root / "vision", descriptor.visionSource, descriptor.vision);
-}
-
-QwenVisionWeights loadVisionWeights(metal::MetalBackend &backend, WeightImages &images,
-                                    const std::filesystem::path &root, const ModelDescriptor &descriptor,
-                                    const VisionLoader *loader) {
-  if (loader) return loadQwenVisionWeights(backend, images, *loader);
-  if (descriptor.visionSource == VisionSource::Packed)
-    return loadQwenVisionWeights(backend, images, root / "vision", descriptor.vision);
-  return {};
 }
 
 uint64_t modelWeightBytes(const std::filesystem::path &root, const ModelDescriptor &descriptor) {
@@ -121,7 +122,7 @@ uint64_t modelWeightBytes(const std::filesystem::path &root, const ModelDescript
     WeightSource source(findTargetGguf(root / "target"));
     const GgufFile file(source);
     bytes = std::visit(
-        [&](const auto &layout) { return imageBytes(gguf::planImages(file, ggufTargetGeometry(layout))); },
+        [&](const auto &layout) { return imageBytes(gguf::planImages(file, layout)); },
         descriptor.target);
   } else if (descriptor.targetSource == TargetSource::Mlx) {
     bytes = std::visit([](const auto &layout) { return imageBytes(affineTargetImages(layout)); }, descriptor.target);
@@ -131,9 +132,9 @@ uint64_t modelWeightBytes(const std::filesystem::path &root, const ModelDescript
   if (descriptor.visionSource == VisionSource::Mlx || descriptor.visionSource == VisionSource::Gguf)
     bytes += visionImageBytes(descriptor.vision);
   for (std::string_view directory : {"target", "draft", "vision"}) {
-    if (directory == "vision" && descriptor.visionSource != VisionSource::Packed) continue;
+    if (directory == "vision" && descriptor.visionSource != VisionSource::Package) continue;
     if (directory == "draft" && descriptor.draftFromCheckpoint()) continue;
-    if (directory == "target" && descriptor.targetSource != TargetSource::Packed) continue;
+    if (directory == "target" && descriptor.targetSource != TargetSource::Package) continue;
     for (const auto &entry : std::filesystem::recursive_directory_iterator(root / directory)) {
       if (!entry.is_regular_file()) continue;
       const uint64_t size = entry.file_size();
@@ -141,7 +142,7 @@ uint64_t modelWeightBytes(const std::filesystem::path &root, const ModelDescript
       bytes += size;
     }
   }
-  if (!bytes) throw std::invalid_argument("model package contains no regular files");
+  if (!bytes) throw std::invalid_argument("the model root holds no weight files");
   return bytes;
 }
 

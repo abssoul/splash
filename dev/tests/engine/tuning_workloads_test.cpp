@@ -21,20 +21,12 @@ static_assert(!tuning::kPrefillProbeRows.empty() &&
               tuning::kPrefillProbeRows.back() == ExecutionLimits::prefillTokenBudget);
 static_assert(tuning::kDecodeProbeWidths == std::array<uint32_t, 4>{1, 2, 3, 4});
 
+using splash::test::rejects;
 using splash::test::require;
-
-template <class Function> void rejects(Function function) {
-  try {
-    function();
-  } catch (const std::invalid_argument &) {
-    return;
-  }
-  throw std::runtime_error("invalid tuning inventory was accepted");
-}
 
 // The collector only borrows projection metadata. Empty immutable Metal
 // handles make any accidental allocation, weight access or dispatch fail;
-// these tests never construct a MetalBackend or load a model package.
+// these tests never construct a MetalBackend or load a model.
 Projection projection(uint32_t output, uint32_t input) {
   return {output, input, AffineWeights{}};
 }
@@ -125,12 +117,12 @@ std::set<LinearWorkload> linearKeys(const std::vector<tuning::LinearTuningInput>
 // of the collector's layer visitor. In particular, draft residuals are in
 // convolution, not linear; target down/mixer residuals are fused linear ops.
 std::set<LinearWorkload> expectedLinear(
-    const ModelPackage &package, std::span<const uint32_t> prefill,
+    const LoadedModel &model, std::span<const uint32_t> prefill,
     std::span<const uint32_t> decode) {
   const auto target = std::visit([](const auto &weights) {
     return qwenTargetGeometry(weights);
-  }, package.target);
-  const auto &draft = package.draft.layout;
+  }, model.target);
+  const auto &draft = model.draft.layout;
   std::set<LinearWorkload> result;
   auto add = [&](LinearMatrix matrix, LinearPhase phase, LinearEpilogue epilogue) {
     for (uint32_t size : phase == LinearPhase::Prefill ? prefill : decode)
@@ -145,11 +137,11 @@ std::set<LinearWorkload> expectedLinear(
       add(matrix, phase, LinearEpilogue::None);
     add({target.hiddenSize, target.attentionWidth}, phase, LinearEpilogue::Residual);
     if (target.ffnKind == QwenFfnKind::Dense)
-      add({target.hiddenSize, target.denseIntermediateSize}, phase,
+      add({target.hiddenSize, target.intermediateSize}, phase,
            LinearEpilogue::Residual);
   }
   if (target.ffnKind == QwenFfnKind::Dense) {
-    const LinearMatrix up{target.denseIntermediateSize, target.hiddenSize};
+    const LinearMatrix up{target.intermediateSize, target.hiddenSize};
     add(up, LinearPhase::Prefill, LinearEpilogue::None);
     add(up, LinearPhase::Prefill, LinearEpilogue::UpWithGate);
     add(up, LinearPhase::Decode, LinearEpilogue::GateUp);
@@ -165,17 +157,17 @@ std::set<LinearWorkload> expectedLinear(
   return result;
 }
 
-void checkPair(ModelPackage package) {
+void checkPair(LoadedModel model) {
   const auto startup = collectTuningWorkloads(
-      package, tuning::kPrefillProbeRows, tuning::kDecodeProbeWidths);
+      model, tuning::kPrefillProbeRows, tuning::kDecodeProbeWidths);
   require(linearKeys(startup) == expectedLinear(
-              package, tuning::kPrefillProbeRows, tuning::kDecodeProbeWidths),
+              model, tuning::kPrefillProbeRows, tuning::kDecodeProbeWidths),
           "startup inventory differs from fixed 2048 prefill and B1-B4 decode");
   // The metadata collector still describes exact ragged rows for correctness
   // and dependency checks; these are not additional calibration workloads.
   constexpr std::array prefill{2048U, 17U, 2048U};
   constexpr std::array decode{4U, 1U, 3U, 2U, 4U};
-  const auto inventory = collectTuningWorkloads(package, prefill, decode);
+  const auto inventory = collectTuningWorkloads(model, prefill, decode);
   const auto keys = linearKeys(inventory);
   for (const auto &input : inventory) {
     require(input.weights.size() == 1, "tied empty views were not deduplicated");
@@ -183,37 +175,43 @@ void checkPair(ModelPackage package) {
     require(!weight.affine().weights && !weight.affine().scales && !weight.affine().biases,
             "inventory created weight backing");
   }
-  require(keys == expectedLinear(package, prefill, decode),
+  require(keys == expectedLinear(model, prefill, decode),
           "inventory differs from production operation/phase/epilogue set");
 
-  package.descriptor.name = "unseen-paired-model-with-identical-operators";
-  package.manifestFingerprintSha256 = "different-weight-identity";
+  model.descriptor.name = "unseen-paired-model-with-identical-operators";
+  model.manifestFingerprintSha256 = "different-weight-identity";
   // An extra same-shape layer and duplicate probe sizes must not multiply the
   // offline sweep. Neither sessions nor manifest names are workload keys.
   std::visit([](auto &target) {
     target.layers.push_back(target.layers.front());
-  }, package.target);
-  package.draft.layers.push_back(package.draft.layers.front());
-  const auto renamed = collectTuningWorkloads(package, prefill, decode);
+  }, model.target);
+  model.draft.layers.push_back(model.draft.layers.front());
+  const auto renamed = collectTuningWorkloads(model, prefill, decode);
   require(linearKeys(renamed) == keys,
           "dedup depends on layer count or model/weight names");
-  const auto noDecode = collectTuningWorkloads(package, prefill, {});
-  require(linearKeys(noDecode) == expectedLinear(package, prefill, {}),
+  const auto noDecode = collectTuningWorkloads(model, prefill, {});
+  require(linearKeys(noDecode) == expectedLinear(model, prefill, {}),
           "prefill-only sweep introduced decode work");
-  const auto empty = collectTuningWorkloads(package, {}, {});
+  const auto empty = collectTuningWorkloads(model, {}, {});
   require(empty.empty(), "empty probe sets created work");
-  rejects([&] { (void)collectTuningWorkloads(package, std::array{0U}, decode); });
-  rejects([&] { (void)collectTuningWorkloads(package, std::array{2049U}, decode); });
-  rejects([&] { (void)collectTuningWorkloads(package, prefill, std::array{0U}); });
-  rejects([&] { (void)collectTuningWorkloads(package, prefill, std::array{5U}); });
-  package.draft.contextProjection.inputSize = 0;
-  rejects([&] { (void)collectTuningWorkloads(package, prefill, decode); });
+  for (const uint32_t rows : {0U, 2049U})
+    rejects([&] { (void)collectTuningWorkloads(model, std::array{rows}, decode); },
+            "invalid operator prefill probe size",
+            "a prefill probe of no rows or past the budget was accepted");
+  for (const uint32_t width : {0U, 5U})
+    rejects([&] { (void)collectTuningWorkloads(model, prefill, std::array{width}); },
+            "invalid operator decode probe width",
+            "a decode probe of no lanes or more than a batch was accepted");
+  model.draft.contextProjection.inputSize = 0;
+  rejects([&] { (void)collectTuningWorkloads(model, prefill, decode); },
+          "operator probe projection has no geometry",
+          "a projection without an input width was collected");
 }
 
 // A GGUF target is not tuned: the collector takes none of its projections,
 // only the affine draft's.
 void blockTarget() {
-  ModelPackage package;
+  LoadedModel model;
   const Qwen3_6MoeLayout layout;
   auto target = targetWeights<Qwen3_6MoeWeights>(layout);
   const auto block = [](const Projection &p) {
@@ -228,15 +226,9 @@ void blockTarget() {
     }, layer.mixer);
     layer.ffn = BlockMoeWeights{};
   }
-  package.target = std::move(target);
-  DFlashDraftLayout draft;
-  draft.layers = 6;
-  draft.hiddenSize = 2048;
-  draft.dynamicSize = 512;
-  draft.intermediateSize = 6144;
-  draft.targetHiddenSize = 16384;
-  package.draft = draftWeights(draft);
-  const auto inventory = collectTuningWorkloads(package, tuning::kPrefillProbeRows,
+  model.target = std::move(target);
+  model.draft = draftWeights(kQwen3_6MoeDraftLayout);
+  const auto inventory = collectTuningWorkloads(model, tuning::kPrefillProbeRows,
                                                 tuning::kDecodeProbeWidths);
   for (const auto &input : linearKeys(inventory))
     require(input.epilogue != LinearEpilogue::Residual &&
@@ -247,26 +239,20 @@ void blockTarget() {
 }
 
 void run() {
-  ModelPackage dense;
+  LoadedModel dense;
   dense.target = targetWeights<Qwen3_8Weights>(Qwen3_8Layout{});
-  dense.draft = draftWeights(DFlashDraftLayout{});
+  dense.draft = draftWeights(kQwen3_8DraftLayout);
   checkPair(dense);
 
-  ModelPackage sparse;
+  LoadedModel sparse;
   sparse.target = targetWeights<Qwen3_6MoeWeights>(Qwen3_6MoeLayout{});
-  DFlashDraftLayout smallerDraft;
-  smallerDraft.layers = 6;
-  smallerDraft.hiddenSize = 2048;
-  smallerDraft.dynamicSize = 512;
-  smallerDraft.intermediateSize = 6144;
-  smallerDraft.targetHiddenSize = 16384;
-  sparse.draft = draftWeights(smallerDraft);
+  sparse.draft = draftWeights(kQwen3_6MoeDraftLayout);
   checkPair(sparse);
 
   Qwen3_8Layout alternateDense;
   alternateDense.hiddenSize = 4096;
   alternateDense.intermediateSize = 14336;
-  DFlashDraftLayout alternateDraft;
+  DFlashDraftLayout alternateDraft = kQwen3_8DraftLayout;
   alternateDraft.hiddenSize = 4096;
   alternateDraft.dynamicSize = 1024;
   alternateDraft.intermediateSize = 12288;
@@ -287,6 +273,7 @@ void run() {
   alternateSparse.experts = 32;
   alternateSparse.expertsPerToken = 4;
   alternateSparse.expertIntermediateSize = 1024;
+  DFlashDraftLayout smallerDraft = kQwen3_6MoeDraftLayout;
   smallerDraft.hiddenSize = 1024;
   smallerDraft.dynamicSize = 256;
   smallerDraft.intermediateSize = 4096;
@@ -296,9 +283,11 @@ void run() {
   checkPair(sparse);
 
   dense.draft.layers.clear();
-  rejects([&] { (void)collectTuningWorkloads(dense, std::array{32U}, std::array{1U}); });
+  rejects([&] { (void)collectTuningWorkloads(dense, std::array{32U}, std::array{1U}); },
+          "operator probes require draft layers", "a draft without layers was collected");
   std::get<Qwen3_6MoeWeights>(sparse.target).layers.clear();
-  rejects([&] { (void)collectTuningWorkloads(sparse, std::array{32U}, std::array{1U}); });
+  rejects([&] { (void)collectTuningWorkloads(sparse, std::array{32U}, std::array{1U}); },
+          "operator probes require target layers", "a target without layers was collected");
 }
 
 void metadataViews(const char *metallib) {
@@ -309,10 +298,10 @@ void metadataViews(const char *metallib) {
   // Components are intentionally tiny because no projection is executed.
   const auto backing = backend.allocateBuffer(32 * 1024, BufferStorage::Shared,
                                                "tuning-inventory-view-test");
-  ModelPackage package;
-  package.target = targetWeights<Qwen3_8Weights>(Qwen3_8Layout{});
-  package.draft = draftWeights(DFlashDraftLayout{});
-  auto &target = std::get<Qwen3_8Weights>(package.target);
+  LoadedModel model;
+  model.target = targetWeights<Qwen3_8Weights>(Qwen3_8Layout{});
+  model.draft = draftWeights(kQwen3_8DraftLayout);
+  auto &target = std::get<Qwen3_8Weights>(model.target);
   const LinearWorkload key{{target.layout.intermediateSize, target.layout.hiddenSize},
                            8, LinearPhase::Decode, LinearEpilogue::GateUp};
   auto view = [&](uint32_t index, bool gate) {
@@ -341,12 +330,12 @@ void metadataViews(const char *metallib) {
     }
     // Target and draft execute the same GateUp shape in this pair. They also
     // share a representative here, so this must not add another measurement.
-    for (auto &layer : package.draft.layers) {
+    for (auto &layer : model.draft.layers) {
       layer.upProjection = target.layers.front().upProjection;
       layer.gateProjection = target.layers.front().gateProjection;
     }
     const auto bytes = backend.memoryStats().allocatedBytes;
-    const auto inventory = collectTuningWorkloads(package, std::array{32U}, std::array{1U});
+    const auto inventory = collectTuningWorkloads(model, std::array{32U}, std::array{1U});
     (void)linearKeys(inventory);
     const auto found = std::find_if(inventory.begin(), inventory.end(),
                                     [&](const auto &input) { return input.workload == key; });

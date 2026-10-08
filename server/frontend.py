@@ -4,7 +4,6 @@ import hashlib
 import json
 import secrets
 import threading
-from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from itertools import count
@@ -28,8 +27,14 @@ from .chat_templates import (
     template_options,
 )
 from .diagnostics import print_status
-from .errors import APIError, ContextLengthError
+from .errors import (
+    APIError,
+    ContextLengthError,
+    RequestValidationError,
+    field_error,
+)
 from .latency import LatencyMetrics
+from .lru import LRUCache
 from .metrics import is_finite_number
 from .serve_options import REASONING_EFFORTS, parse_served_model_name
 from .tokenization import PromptTokenizer
@@ -86,6 +91,18 @@ SAMPLING_NUMBERS = {
 # are. With it, the table covers every sampling option the frame carries.
 TOP_K_DEFAULT = 20
 assert set(SAMPLING_NUMBERS) | {"top_k"} == set(wire.SAMPLING_FIELDS)
+
+
+def _preparation_checkpoint(deadline, disconnected):
+    """A check that a request's preparation may go on: its deadline has not
+    passed, and its client has not left."""
+
+    def checkpoint():
+        remaining_request_time(deadline)
+        if disconnected():
+            raise ConnectionResetError("client disconnected during preparation")
+
+    return checkpoint
 
 
 def _drop_nulls(body, extras):
@@ -146,57 +163,38 @@ class ResponseStore:
     BUDGET_BYTES = 64 * 1024 * 1024
 
     def __init__(self):
-        self.records = OrderedDict()
-        self.bytes = 0
-        self.evictions = 0
+        self.records = LRUCache(self.BUDGET_BYTES)
         self.hits = 0
         self.misses = 0
         self.lock = threading.Lock()
 
     def get(self, response_id):
         with self.lock:
-            record = self.records.pop(response_id, None)
+            record = self.records.get(response_id)
             if record is None:
                 self.misses += 1
-                return None
-            self.records[response_id] = record
-            self.hits += 1
+            else:
+                self.hits += 1
         return record
 
     def put(self, response, history_items):
         record = StoredResponse(
             json_codec.encode(response), json_codec.encode(history_items)
         )
-        if record.size > self.BUDGET_BYTES:
-            return False
-        response_id = response["id"]
         with self.lock:
-            previous = self.records.pop(response_id, None)
-            if previous is not None:
-                self.bytes -= previous.size
-            self.records[response_id] = record
-            self.bytes += record.size
-            while self.bytes > self.BUDGET_BYTES:
-                _, evicted = self.records.popitem(last=False)
-                self.bytes -= evicted.size
-                self.evictions += 1
-        return True
+            return self.records.put(response["id"], record, record.size)
 
     def delete(self, response_id):
         with self.lock:
-            record = self.records.pop(response_id, None)
-            if record is None:
-                return False
-            self.bytes -= record.size
-            return True
+            return self.records.pop(response_id) is not None
 
     def stats(self):
         with self.lock:
             return {
                 "entries": len(self.records),
-                "bytes": self.bytes,
-                "budget_bytes": self.BUDGET_BYTES,
-                "evictions": self.evictions,
+                "bytes": self.records.bytes,
+                "budget_bytes": self.records.budget_bytes,
+                "evictions": self.records.evictions,
                 "hits": self.hits,
                 "misses": self.misses,
             }
@@ -472,7 +470,9 @@ class Frontend:
         if timeout is None:
             timeout = self.request_timeout
         elif not is_finite_number(timeout) or timeout <= 0:
-            raise APIError(400, "timeout must be positive")
+            raise RequestValidationError(
+                [field_error(["timeout"], "timeout must be positive")]
+            )
         return started_at + min(timeout, self.request_timeout)
 
     def prepare(
@@ -605,26 +605,27 @@ class Frontend:
             prompt_sha256=prompt_sha256,
         )
 
-    def _encode_score_prompt(self, messages, labels, admit, deadline, what):
+    def _encode_score_prompt(self, messages, labels, admit, checkpoint, what):
         """The tokens, answer-slot token ids and text of a scoring prompt. The
         request's input drives the render, so a failure is its error."""
         try:
             return judgments.encode_prompt(
-                self.tokenizer,
+                self.prompt_tokenizer,
                 self.chat_templates.select(None).source,
                 messages,
                 labels,
                 admit=admit,
-                checkpoint=lambda: remaining_request_time(deadline),
+                checkpoint=checkpoint,
             )
         except judgments.ScoringUnsupported as error:
             raise APIError(500, str(error), "scoring_unsupported") from error
-        except (APIError, judgments.SystemOneError):
+        except (APIError, ConnectionResetError):
+            # The request's own limits, deadline and client end preparation.
             raise
         except Exception as error:
             raise APIError(400, f"{what} prompt could not be rendered") from error
 
-    def prepare_judgment(self, body, *, deadline):
+    def prepare_judgment(self, body, *, deadline, disconnected):
         unknown = sorted(
             set(body)
             - {"id", "state", "question", "options", "model", "timeout", "priority"}
@@ -638,10 +639,11 @@ class Frontend:
         except ValueError as error:
             raise APIError(400, str(error)) from error
         priority = self._priority(body)
+        checkpoint = _preparation_checkpoint(deadline, disconnected)
         with self._preparation(deadline):
 
             def admit(prompt_tokens):
-                remaining_request_time(deadline)
+                checkpoint()
                 if prompt_tokens > self.max_context:
                     raise ContextLengthError(prompt_tokens, self.max_context)
 
@@ -649,36 +651,35 @@ class Frontend:
                 judgments.judgment_messages(body),
                 judgments.LETTERS[: len(body["options"])],
                 admit,
-                deadline,
+                checkpoint,
                 "judgment",
             )
-            remaining_request_time(deadline)
+            checkpoint()
             job = self._score_job(
                 tokens, slots, deadline, priority, judgments.digest(prompt)
             )
         return job, body
 
-    def prepare_systemone(self, body, *, deadline):
+    def prepare_systemone(self, body, *, deadline, disconnected):
         details = []
         model = body.get("model")
         if not isinstance(model, str) or not model:
-            details.append(judgments.detail(["model"], "field required", "missing"))
+            details.append(field_error(["model"], "field required", "missing"))
         elif not self.accepts_model(model):
             details.append(
-                judgments.detail(
-                    ["model"], f"model {model} is not served by this endpoint"
-                )
+                field_error(["model"], f"model {model} is not served by this endpoint")
             )
         state, specs, question_details = judgments.validate_systemone(body)
         details.extend(question_details)
         try:
             priority = self._priority(body)
         except APIError as error:
-            details.append(judgments.detail(["priority"], error.message))
+            details.append(field_error(["priority"], error.message))
         if details:
-            raise judgments.SystemOneError(details)
+            raise RequestValidationError(details)
         jobs = []
         total_tokens = 0
+        checkpoint = _preparation_checkpoint(deadline, disconnected)
         with self._preparation(deadline):
             for qid, spec in specs:
                 if spec.deterministic:
@@ -686,9 +687,9 @@ class Frontend:
                     continue
                 slots = judgments.slot_labels(self.tokenizer)
                 if len(spec.labels) > len(slots):
-                    raise judgments.SystemOneError(
+                    raise RequestValidationError(
                         [
-                            judgments.detail(
+                            field_error(
                                 ["questions", qid, "criteria"],
                                 f"the served tokenizer supports "
                                 f"{len(slots)} answer slots; "
@@ -699,13 +700,13 @@ class Frontend:
                 labels = slots[: len(spec.labels)]
 
                 def admit(prompt_tokens, qid=qid, prepared=total_tokens):
-                    remaining_request_time(deadline)
+                    checkpoint()
                     if prompt_tokens > self.max_context:
                         raise ContextLengthError(prompt_tokens, self.max_context)
                     if prepared + prompt_tokens > judgments.MAX_SYSTEMONE_TOTAL_TOKENS:
-                        raise judgments.SystemOneError(
+                        raise RequestValidationError(
                             [
-                                judgments.detail(
+                                field_error(
                                     ["questions", qid],
                                     "total prepared question tokens exceed "
                                     f"{judgments.MAX_SYSTEMONE_TOTAL_TOKENS}",
@@ -717,10 +718,10 @@ class Frontend:
                     judgments.systemone_messages(state, spec, labels),
                     labels,
                     admit,
-                    deadline,
+                    checkpoint,
                     "question",
                 )
-                remaining_request_time(deadline)
+                checkpoint()
                 total_tokens += len(tokens)
                 jobs.append(
                     (qid, spec, self._score_job(tokens, slot_ids, deadline, priority))
@@ -1134,7 +1135,7 @@ class Frontend:
             **fields,
         )
 
-    def prepare_responses(self, body, *, deadline, reserve_input=None):
+    def prepare_responses(self, body, *, deadline, reserve_input):
         store = body.get("store")
         if store is not None and not isinstance(store, bool):
             raise APIError(400, "store must be a boolean")
@@ -1157,8 +1158,7 @@ class Frontend:
                     )
                 # The immutable record remains valid if the store evicts it.
                 # Reserve its input bytes before materializing the history.
-                if reserve_input is not None:
-                    reserve_input(len(previous.history_json))
+                reserve_input(len(previous.history_json))
                 previous_items = json_codec.loads(previous.history_json)
             items = [*previous_items, *canonical_responses_input(body.get("input"))]
             chat, namespaces = responses_to_chat_body(body, items)

@@ -14,6 +14,7 @@ using namespace splash::engine;
 
 namespace {
 
+using splash::test::rejects;
 using splash::test::require;
 
 engine::RequestSpec
@@ -73,7 +74,7 @@ void testAdmissionSharesDispatchOrderAndBudget() {
                               PrefillAdmission{4, 0}};
   require(scheduler.prefillAdmissionOrder(candidates) ==
               std::vector<uint64_t>({3, 4}),
-          "admission did not pack cached and short work ahead of cold work");
+          "admission did not take cached and short work ahead of cold work");
   scheduler.resourcesReady(3, 4096);
   scheduler.resourcesReady(4, 0);
   const auto plan = *scheduler.next({});
@@ -181,7 +182,7 @@ void testShortestRemainingFirstUsesActualRows() {
   scheduler.resourcesReady(3, 0);
   BatchPlan plan = *scheduler.next({});
   require(plan.kind == WorkKind::Prefill && plan.items.size() == 3,
-          "ragged prefill did not pack all ready sequences");
+          "ragged prefill did not batch all ready sequences");
   uint32_t rows = 0;
   for (const BatchItem &item : plan.items)
     rows += item.tokenCount;
@@ -241,13 +242,8 @@ void testReachedBoundaryIsConsumedBeforeTheNextIsArmed() {
   const BatchPlan reaching = *scheduler.next({});
   require(reaching.items[0].tokenCount == 64, "the boundary did not cap the command");
   completePrefill(scheduler, reaching);
-  bool refused = false;
-  try {
-    scheduler.setPrefillBoundary(1, 64);
-  } catch (const std::invalid_argument &) {
-    refused = true;
-  }
-  require(refused, "a boundary the request has reached was armed again");
+  rejects([&] { scheduler.setPrefillBoundary(1, 64); }, "invalid prefill boundary",
+          "a boundary the request has reached was armed again");
   scheduler.setPrefillBoundary(1, 128);
   const BatchPlan next = *scheduler.next({});
   require(next.items[0].promptOffset == 64 && next.items[0].tokenCount == 64,
@@ -437,13 +433,9 @@ void testRejectedCommitCountsNothing() {
   scheduler.resourcesReady(2, 1);
   const BatchPlan stale = *scheduler.next({});
   scheduler.cancel(2);
-  bool rejected = false;
-  try {
-    scheduler.commit(stale, {});
-  } catch (const std::logic_error &) {
-    rejected = true;
-  }
-  require(rejected && scheduler.snapshot().decodeBatches == 0,
+  rejects([&] { scheduler.commit(stale, {}); }, "batch no longer matches scheduler state",
+          "a commit of a cancelled request's batch was accepted");
+  require(scheduler.snapshot().decodeBatches == 0,
           "rejected commit incremented decode counters");
   completeDecode(scheduler);
   require(scheduler.snapshot().decodeBatches == 1,
@@ -794,7 +786,7 @@ void testMeasuredBudgetDoesNotCountBlockedPeers() {
           "queued or resource-blocked work reduced resident throughput");
 }
 
-void testMeasuredBudgetPreservesPurePrefillPacking() {
+void testMeasuredBudgetPreservesPurePrefillBatching() {
   engine::Scheduler scheduler(0.0);
   scheduler.boundIsolatedPrefill(5000.0);
   scheduler.submit(request(1, 20'000));
@@ -809,7 +801,7 @@ void testMeasuredBudgetPreservesPurePrefillPacking() {
   require(plan.kind == WorkKind::Prefill && plan.width() == 2 &&
               plan.items[0].tokenCount == 32 &&
               plan.items[1].tokenCount == 2016,
-          "pure prefill contention lost throughput or stopped packing peers");
+          "pure prefill contention lost throughput or stopped batching peers");
 }
 
 void testTinyTailDoesNotDistortPrefillThroughput() {
@@ -885,9 +877,9 @@ void testShortArrivalBesideLongPrefillEndsAtItsLastRow() {
               slice.items[0].tokenCount == 128,
           "the long prefill did not return to slices beside the decoding arrival");
 
-  const BatchPlan packed = *beside({3000}).next({});
-  require(packed.width() == 1 && packed.items[0].requestId == 2 &&
-              packed.items[0].tokenCount == 2048,
+  const BatchPlan full = *beside({3000}).next({});
+  require(full.width() == 1 && full.items[0].requestId == 2 &&
+              full.items[0].tokenCount == 2048,
           "an arrival that does not finish in one command lost the full budget");
 
   const BatchPlan first = *beside({300, 300}).next({});
@@ -1080,13 +1072,8 @@ void testWaitingMaskExpiresAtRequestDeadline() {
               scheduler.phase(1) == engine::Phase::Failed,
           "waiting mask survived its request deadline");
 
-  bool rejectedLateMask = false;
-  try {
-    scheduler.maskReady(1);
-  } catch (const std::logic_error &) {
-    rejectedLateMask = true;
-  }
-  require(rejectedLateMask, "late mask revived an expired request");
+  rejects([&] { scheduler.maskReady(1); }, "request is not waiting for a mask",
+          "late mask revived an expired request");
 }
 
 void testWaitingMaskBoundsPeerPrefill() {
@@ -1218,7 +1205,7 @@ int main() {
     testMeasuredBudgetPreservesPriorityAndStateBoundaries();
     testUnavailableTimingAndMinimumBudget();
     testMeasuredBudgetDoesNotCountBlockedPeers();
-    testMeasuredBudgetPreservesPurePrefillPacking();
+    testMeasuredBudgetPreservesPurePrefillBatching();
     testTinyTailDoesNotDistortPrefillThroughput();
     testMeasuredBudgetFinishesShortPrefillPromptly();
     testShortArrivalBesideLongPrefillEndsAtItsLastRow();

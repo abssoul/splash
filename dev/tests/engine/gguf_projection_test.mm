@@ -35,6 +35,7 @@
 #include <random>
 #include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace splash;
@@ -310,7 +311,7 @@ Outcome run(MetalBackend &backend, const Linear &linear, const LinearPlan &plan,
   scratch.poison(poison);
   CommandGraph graph;
   static_cast<void>(linear.add(graph, o.bindings(plan, scratch), p, plan, gate));
-  static_cast<void>(backend.submitCommand(graph.dispatches()));
+  static_cast<void>(backend.submitCommandAsync(graph.dispatches()).wait());
   if (!scratch.intact() || !o.input.intact() || !o.aux.intact() || !o.output.intact() || !o.gate.intact())
     fail(label + ": a counter is not reset or a write past a buffer");
   Outcome out{o.output.halves(), plan.workload().epilogue == LinearEpilogue::GateUp ? o.gate.halves()
@@ -372,7 +373,7 @@ void floatOutput(MetalBackend &backend, const Linear &linear, const LinearPlan &
   CommandGraph graph;
   static_cast<void>(linear.add(graph, {.input = input.view, .output = output.view, .scratch = scratch.bindings()},
                                p, plan));
-  static_cast<void>(backend.submitCommand(graph.dispatches()));
+  static_cast<void>(backend.submitCommandAsync(graph.dispatches()).wait());
   if (!scratch.intact() || !input.intact() || !output.intact())
     fail(label + " fp32: a counter is not reset or a write past a buffer");
   const auto *values = static_cast<const uint32_t *>(output.view.contents());
@@ -591,6 +592,44 @@ void prefill(MetalBackend &backend, const Linear &linear) {
           "chunks and chunks of 8-32 rows (S 1 and 4) within fp64, equal to the 128-row tiles");
 }
 
+// ---------------------------------------------------------------- leading inputs
+// A view of the leading inputs of a projection's rows (Projection::leadingInputs), as the ANE FFN split runs down's GPU
+// share: its residual prefill (gguf_prefill_<format>_r_leading_inputs) equals bit for bit the residual prefill of
+// those inputs repacked on their own, in every format, over two plane tiles of rows.
+void leadingInputs(MetalBackend &backend, const Linear &linear) {
+  constexpr uint32_t N = 512, K = 1024, kLeading = 512, kChunk = 168;
+  for (int fi = 0; fi < FMT_COUNT; ++fi) {
+    const Fmt f = Fmt(fi);
+    const Tensor whole = tensor(backend, f, N, K);
+    std::vector<uint8_t> leading;
+    for (uint32_t row = 0; row < N; ++row) {
+      const auto begin = whole.native.begin() + uint64_t{row} * rowBytes(f, K);
+      leading.insert(leading.end(), begin, begin + rowBytes(f, kLeading));
+    }
+    const Packed planes = repack(f, leading, N, kLeading, nullptr);
+    const Projection compact(
+        N, kLeading,
+        BlockWeights{{QuantizedSegment::planes(f, N, kLeading, upload(backend, planes.w0),
+                                               kQuantFormats[f].plane1_bytes ? upload(backend, planes.w1)
+                                                                             : MetalBuffer{},
+                                               upload(backend, planes.meta))}});
+    const Projection view = Projection(N, K, BlockWeights{{whole.segment}}).leadingInputs(kLeading);
+    const LinearWorkload w{{N, kLeading}, kChunk, LinearPhase::Prefill, LinearEpilogue::Residual,
+                           WeightLayout::Block32};
+    const LinearPlan plan = Linear::plan(w, {.tile = LinearTile::GgufPrefill}, FloatOutput::BFloat16);
+    const uint32_t storage = plan.storageRows();
+    const std::vector<uint16_t> x = storageRows(activations(Inputs::Dense, storage, kLeading), kLeading, kChunk,
+                                                storage);
+    const std::vector<uint16_t> aux = storageRows(residuals(storage, N), N, storage, storage);
+    const std::string label = std::string(fmtName(fi)) + " leading inputs";
+    const Outcome expected = run(backend, linear, plan, compact, nullptr, x, aux, kPoisonNaN, N, label);
+    const Outcome got = run(backend, linear, plan, view, nullptr, x, aux, kPoisonNaN, N, label);
+    if (got.output != expected.output) fail(label + ": differs from the repacked leading inputs");
+  }
+  section("leading inputs: " + std::to_string(FMT_COUNT) + " formats' residual prefill over a view of 512 of 1024 "
+          "inputs equal to them repacked");
+}
+
 // ---------------------------------------------------------------- split visibility
 // Two projections of a decode step run back to back and share one split scratch, as every GGUF projection of a step
 // does, at each pair of K splits the tile's policy (Apple9: register, Apple10: staged) picks for 8-80 cores. The
@@ -672,7 +711,7 @@ void splitVisibility(MetalBackend &backend, const Linear &linear, LinearTile til
   for (uint32_t i = 0; i < 2; ++i)
     static_cast<void>(linear.add(unsplit, operands[i].bindings(plan(i, 1), scratch), weights[i][0], plan(i, 1),
                                  gateOf(i)));
-  static_cast<void>(backend.submitCommand(unsplit.dispatches()));
+  static_cast<void>(backend.submitCommandAsync(unsplit.dispatches()).wait());
   check({1, 1}, shape + " unsplit");
   for (const auto &splits : splitPairs) {
     const std::string what = shape + " splits " + std::to_string(splits[0]) + "/" + std::to_string(splits[1]);
@@ -688,7 +727,7 @@ void splitVisibility(MetalBackend &backend, const Linear &linear, LinearTile til
     std::array<bool, 2> varies{};
     for (const uint32_t bits : {kPoisonFinite, kPoisonNaN, kPoisonFinite}) {
       std::fill_n(static_cast<uint32_t *>(poison.contents()), size.partials / 4, bits);
-      static_cast<void>(backend.submitCommand(graph.dispatches()));
+      static_cast<void>(backend.submitCommandAsync(graph.dispatches()).wait());
       for (uint32_t i = 0; i < 2; ++i) {
         const std::vector<uint16_t> output = operands[i].output.halves();
         if (first[i].empty()) first[i] = output;
@@ -720,7 +759,7 @@ void tokenGather(MetalBackend &backend) {
     std::memcpy(ids.view.contents(), tokens.data(), ids.bytes);
     CommandGraph graph;
     Embedding::add(graph, ids.view, table, output.view, uint32_t(tokens.size()));
-    static_cast<void>(backend.submitCommand(graph.dispatches()));
+    static_cast<void>(backend.submitCommandAsync(graph.dispatches()).wait());
     if (!output.intact()) fail(std::string(fmtName(f)) + " gather writes past its output");
     const std::vector<uint16_t> got = output.halves();
     std::vector<float> values(kHidden);
@@ -732,6 +771,66 @@ void tokenGather(MetalBackend &backend) {
     if (differ) fail(std::string(fmtName(f)) + " gather: " + std::to_string(differ) + " values differ from bf16(GGML)");
   }
   section("token gather: " + std::to_string(formats) + " embedding formats, each value bf16 of GGML's fp32 value");
+}
+
+// Each buffer the token gathers reach, at its extent and one element short:
+// the rows' token ids and bf16 output rows, every token's native blocks, the
+// rotation signs of a rotated PQ2_0 table, and an affine table's Q4 rows with
+// a scale and a bias per 64 values.
+void gatherExtents(MetalBackend &backend) {
+  constexpr uint32_t kVocabulary = 64, kHidden = 1024, kRows = 9;
+  const MetalBuffer tokens = test::sharedBuffer(backend, kRows * 4),
+                    output = test::sharedBuffer(backend, uint64_t{kRows} * kHidden * 2);
+  // A buffer of the table `with` returns with it.
+  const auto requireTableExtent = [&](const MetalBuffer &buffer, uint64_t bytes, uint64_t element, const char *what,
+                                      const auto &with) {
+    test::requireExtent(backend, buffer, bytes, element, what, [&](CommandGraph &graph, const MetalBuffer &view) {
+      Embedding::add(graph, tokens, with(view), output, kRows);
+    });
+  };
+  std::vector<EmbeddingWeights> tables;
+  for (const Fmt f : {Q80, PQ20}) {
+    const QuantFormat &format = kQuantFormats[f];
+    const uint64_t rowBytes = uint64_t{kHidden} / format.block_elements * format.block_bytes;
+    EmbeddingWeights table(kVocabulary, kHidden, NativeRows(test::sharedBuffer(backend, kVocabulary * rowBytes), f));
+    if (f == PQ20) table.rotation.signs = test::sharedBuffer(backend, kHidden);
+    requireTableExtent(table.blocks().rows, kVocabulary * rowBytes, format.block_bytes, "token table",
+                       [&](const MetalBuffer &rows) {
+                         EmbeddingWeights changed(kVocabulary, kHidden, NativeRows(rows, f));
+                         changed.rotation = table.rotation;
+                         return changed;
+                       });
+    if (table.rotation)
+      requireTableExtent(table.rotation.signs, kHidden, 1, "embedding rotation sign", [&](const MetalBuffer &signs) {
+        EmbeddingWeights changed = table;
+        changed.rotation.signs = signs;
+        return changed;
+      });
+    tables.push_back(table);
+  }
+  const uint64_t parameters = uint64_t{kVocabulary} * (kHidden / 64) * 2;
+  const AffineWeights planes{test::sharedBuffer(backend, uint64_t{kVocabulary} * kHidden / 2),
+                             test::sharedBuffer(backend, parameters), test::sharedBuffer(backend, parameters)};
+  for (const auto &[member, bytes, element, what] :
+       std::initializer_list<std::tuple<MetalBuffer AffineWeights::*, uint64_t, uint64_t, const char *>>{
+           {&AffineWeights::weights, uint64_t{kVocabulary} * kHidden / 2, 1, "token table"},
+           {&AffineWeights::scales, parameters, 2, "token table scale"},
+           {&AffineWeights::biases, parameters, 2, "token table bias"}})
+    requireTableExtent(planes.*member, bytes, element, what, [&](const MetalBuffer &view) {
+      AffineWeights changed = planes;
+      changed.*member = view;
+      return EmbeddingWeights(kVocabulary, kHidden, changed);
+    });
+  tables.emplace_back(kVocabulary, kHidden, planes);
+  for (const EmbeddingWeights &table : tables) {
+    test::requireExtent(backend, tokens, kRows * 4, 4, "embedding token", [&](CommandGraph &graph, const MetalBuffer &view) {
+      Embedding::add(graph, view, table, output, kRows);
+    });
+    test::requireExtent(backend, output, uint64_t{kRows} * kHidden * 2, 2, "embedding output",
+                        [&](CommandGraph &graph, const MetalBuffer &view) { Embedding::add(graph, tokens, table, view, kRows); });
+  }
+  section("token gather extents: every buffer of native, rotated and affine tables at its extent and refused one "
+          "element short");
 }
 
 int main(int argc, char **argv) {
@@ -752,6 +851,7 @@ int main(int argc, char **argv) {
         gateUpPairs(backend, linear, tile);
       }
       prefill(backend, linear);
+      leadingInputs(backend, linear);
       // The 27B out_proj then down, and gdn_in then gate/up: K 6144, 17408 and 5120.
       const SplitOperand out = splitOperand(backend, Q4K, {5120, 6144}, LinearEpilogue::Residual);
       const SplitOperand down = splitOperand(backend, Q6K, {5120, 17408}, LinearEpilogue::Residual);
@@ -765,6 +865,7 @@ int main(int argc, char **argv) {
       section("split visibility: both tiles, 1 and 4 lanes, every split pair the policy picks for 8-80 cores, "
               "independent of poisoned partials and within fp64");
       tokenGather(backend);
+      gatherExtents(backend);
     } catch (const std::exception &e) {
       std::cerr << "gguf-projection: FAIL: " << e.what() << '\n';
       return 1;

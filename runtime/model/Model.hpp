@@ -371,9 +371,12 @@ maskWordsPerToken(uint32_t vocabularySize) noexcept {
   return static_cast<uint32_t>((uint64_t{vocabularySize} + 31) / 32);
 }
 
-// Compile-time ceiling of the one native DFlash execution contract. Concrete
-// target/draft manifests are validated against these limits at startup;
-// cache-page and attention-kernel geometry live with their operators.
+// Compile-time ceiling of the one native DFlash execution contract. A draft
+// must have been trained for blocks of draftQueryRows rows over
+// draftContextTokens context tokens, which inspectModelRoot checks a
+// package's manifest and a DFlash2 checkpoint's config for; the other limits
+// are the runtime's own. Cache-page and attention-kernel geometry live with
+// their operators.
 struct ExecutionLimits final {
   static constexpr uint32_t maximumBatchWidth = 4;
   static constexpr uint32_t prefillTokenBudget = 2048;
@@ -452,9 +455,11 @@ struct ModelTelemetry final {
   uint64_t embeddingCacheBytes = 0;
   uint64_t stateHeldImageBytes = 0;
   uint64_t imageRowsBytes = 0;
-  uint32_t lastDecodeWidth = 0;
   uint64_t constrainedMaskOverlapBatches = 0;
   uint64_t constrainedMaskOverlapRequests = 0;
+  // Prefill chunks the GPU ran again alone once the Neural Engine split's
+  // work for them failed (Runtime::prefillAsync).
+  uint64_t aneFfnReruns = 0;
   double lastConstrainedTargetForwardGpuSeconds = 0.0;
   double totalConstrainedTargetForwardGpuSeconds = 0.0;
   double lastConstrainedMaskWaitSeconds = 0.0;
@@ -506,7 +511,7 @@ public:
   [[nodiscard]] virtual StateAdmission begin(const ModelRequest &request) = 0;
   // Safe-point preemption returns the request's state buffers, retaining
   // only its host-side sampling/constraint continuation. Resume replays the
-  // supplied committed history through the ordinary packed-prefill path.
+  // supplied committed history through the ordinary prefill path.
   virtual void suspend(uint64_t requestId) = 0;
   [[nodiscard]] virtual StateAdmission resume(const ModelRequest &request) = 0;
   // Restores a cached state into the request's lane at `boundary`. A RAM

@@ -8,6 +8,36 @@
 #include <stdint.h>
 #endif
 
+// The draft attention the kernels are compiled for, the only one
+// ops::DraftAttention accepts: 32 query heads over 8 KV heads of 128
+// dimensions, so a q|k|v row holds 6144 values and an attention row 4096.
+// The attention core runs a KV head's four query heads over the eight query
+// rows together, as 32 attention rows.
+#define SPLASH_DRAFT_QUERY_HEADS 32u
+#define SPLASH_DRAFT_KV_HEADS 8u
+#define SPLASH_DRAFT_HEAD_DIMENSION 128u
+#define SPLASH_DRAFT_ATTENTION_WIDTH                                           \
+  (SPLASH_DRAFT_QUERY_HEADS * SPLASH_DRAFT_HEAD_DIMENSION)
+#define SPLASH_DRAFT_QKV_WIDTH                                                 \
+  (SPLASH_DRAFT_ATTENTION_WIDTH +                                              \
+   2u * SPLASH_DRAFT_KV_HEADS * SPLASH_DRAFT_HEAD_DIMENSION)
+#define SPLASH_DRAFT_ATTENTION_ROWS                                            \
+  (SPLASH_DRAFT_QUERY_HEADS / SPLASH_DRAFT_KV_HEADS * SPLASH_DRAFT_QUERY_ROWS)
+
+// The dynamic convolutions of a draft layer (draft_conv), each run in two
+// stages, before its attention or MLP and after it with the residual: a
+// stage weighs a channel's row and the row before it, its two taps, each by
+// a base weight plus the dynamic weight of the channel's group of 16
+// channels. The draft projects every row's dynamic weights, for each stage,
+// tap and group of a `hidden`-wide layer.
+#define SPLASH_DRAFT_CONVOLUTION_STAGES 2u
+#define SPLASH_DRAFT_CONVOLUTION_TAPS 2u
+#define SPLASH_DRAFT_CONVOLUTION_GROUP 16u
+inline constexpr uint32_t draft_dynamic_width(uint32_t hidden) {
+  return SPLASH_DRAFT_CONVOLUTION_STAGES * SPLASH_DRAFT_CONVOLUTION_TAPS *
+         (hidden / SPLASH_DRAFT_CONVOLUTION_GROUP);
+}
+
 // The batched draft kernels' grids cover exactly the dispatch's lanes:
 // per-lane arrays hold those lanes, and entries past them are zero and unread.
 
