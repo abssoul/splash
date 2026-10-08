@@ -160,7 +160,10 @@ struct ComputeDispatch {
 // signals, so a signal is never held back behind the dispatches that follow
 // it, and a signal is delivered even when the work before it fails.
 struct EventStep {
-  enum class Kind : uint8_t { Signal, Wait };
+  // Break ends the Metal command buffer without an event, so that macOS can
+  // schedule other work between a long command's parts: it takes no event
+  // and no value.
+  enum class Kind : uint8_t { Signal, Wait, Break };
 
   size_t before = 0;
   SharedEvent event;

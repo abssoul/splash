@@ -47,6 +47,7 @@ public:
                                           IdleMemory scope) noexcept override;
   [[nodiscard]] std::optional<std::string>
   provideMask(uint64_t requestId, std::span<const uint32_t> words) override;
+  [[nodiscard]] uint32_t prefillCommandBuffers() const noexcept override;
   void end(uint64_t requestId) override;
 
   [[nodiscard]] WarmupStepResult warmupPrefill(uint32_t rows) override;

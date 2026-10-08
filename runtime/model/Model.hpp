@@ -561,6 +561,10 @@ public:
   // Why this request's mask is unusable, or nothing when the model took it.
   [[nodiscard]] virtual std::optional<std::string>
   provideMask(uint64_t requestId, std::span<const uint32_t> words) = 0;
+  // How many Metal command buffers a prefill command's heaviest layers end
+  // apart: none of its buffers holds more than about this share of the
+  // command (the scheduler's isolated prefill bound). One by default.
+  [[nodiscard]] virtual uint32_t prefillCommandBuffers() const noexcept { return 1; }
   virtual void end(uint64_t requestId) = 0;
 };
 

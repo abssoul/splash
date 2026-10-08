@@ -172,7 +172,7 @@ def parse_request_timeout(value):
     return seconds
 
 
-# The longest bounded prefill GPU command (runtime/engine/Scheduler.hpp).
+# The longest bounded prefill GPU command buffer (runtime/engine/Scheduler.hpp).
 PREFILL_BOUND_DEFAULT_MS = 2000
 PREFILL_BOUND_MAX_MS = 600_000
 
@@ -552,9 +552,9 @@ SERVE_OPTIONS = (
         dict(
             choices=("bounded", "full"),
             default="bounded",
-            help="bounded (default) keeps each prefill GPU command within a few "
-            "seconds so macOS does not abort long-context prefill; full sends "
-            "whole 2048-token chunks",
+            help="bounded (default) keeps each prefill GPU command buffer, one "
+            "per layer, within a few seconds so macOS does not abort "
+            "long-context prefill; full sends whole 2048-token chunks",
         ),
     ),
     ServeOption(
@@ -564,7 +564,7 @@ SERVE_OPTIONS = (
             type=parse_prefill_bound,
             default=None,
             metavar="MILLISECONDS",
-            help="longest bounded prefill GPU command in milliseconds (default: "
+            help="longest bounded prefill GPU command buffer in milliseconds (default: "
             f"SPLASH_PREFILL_BOUND_MS or {PREFILL_BOUND_DEFAULT_MS}); halved after "
             "each macOS display-stall abort",
         ),

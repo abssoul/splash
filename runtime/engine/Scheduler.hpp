@@ -13,12 +13,12 @@
 
 namespace splash::engine {
 
-// One prefill command runs as one GPU command buffer. On M1 and M2 a full
-// budget over a long context takes up to a minute, and macOS aborts a command
-// that holds the GPU while the display needs it (ImpactingInteractivity);
-// under desktop load an M2 Max aborted 3-5 s commands but not 3 s ones.
-// Isolated prefill keeps each command within this bound; short contexts on
-// current GPUs still get the full budget.
+// On M1 and M2 a full prefill budget over a long context takes up to a
+// minute, and macOS aborts a Metal command buffer that holds the GPU while
+// the display needs it (ImpactingInteractivity); under desktop load an M2 Max
+// aborted 3-5 s buffers but not 3 s ones. A prefill command ends a buffer at
+// every layer, and isolated prefill keeps each buffer within this bound;
+// short contexts still get the full budget.
 inline constexpr double kDefaultPrefillCommandMilliseconds = 2000.0;
 inline constexpr double kUnboundedPrefillCommand =
     std::numeric_limits<double>::infinity();
@@ -81,10 +81,12 @@ public:
 
   void submit(RequestSpec request);
   void observePrefill(uint32_t rows, double wallMilliseconds);
-  // Isolated prefill commands stay within this many milliseconds of GPU
-  // time; kUnboundedPrefillCommand restores full-budget commands whatever
-  // their duration.
-  void boundIsolatedPrefill(double milliseconds);
+  // Each Metal command buffer of an isolated prefill command stays within
+  // this many milliseconds of GPU time, the command splitting into
+  // `buffers` of them (model::Model::prefillCommandBuffers);
+  // kUnboundedPrefillCommand restores full-budget commands whatever their
+  // duration.
+  void boundIsolatedPrefill(double milliseconds, uint32_t buffers = 1);
   void deferAdmission(uint64_t requestId);
   void waitForResources(uint64_t requestId);
   void waitForPrefix(uint64_t requestId);
@@ -184,6 +186,7 @@ private:
   uint64_t decodeDispatchOrder_ = 0;
   double prefillMillisecondsPerToken_ = 0.0;
   double isolatedPrefillMilliseconds_ = kDefaultPrefillCommandMilliseconds;
+  uint32_t isolatedPrefillBuffers_ = 1;
   double decodeShare_;
   // Decode time that prefill still owes the lanes that decoded beside it
   // (not those waiting for a mask): equal-priority decode runs until its

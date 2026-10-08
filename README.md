@@ -112,7 +112,7 @@ window. To set your own limits or cache options, add these to `splash serve`:
 | `--max-context 100K` | Set the context limit. |
 | `--language-only` | Skip vision; serve text only. |
 | `--kv-format bf16` | Use BF16 KV cache. Default: 8-bit (INT8). |
-| `--prefill-bound-ms 1000` | Longest prefill GPU command. Default: 2000 (`SPLASH_PREFILL_BOUND_MS`), so macOS does not abort long-context prefill for stalling the display (`ImpactingInteractivity`); after such an abort the restarted engine halves it, down to 500. `--prefill-mode full` sends whole 2048-token chunks instead. `/status` reports it as `scheduler.prefill_bound_ms`. |
+| `--prefill-bound-ms 1000` | Longest prefill GPU command buffer. Prefill ends a buffer at every layer, so 2048-token chunks still fit at most context lengths. Default: 2000 (`SPLASH_PREFILL_BOUND_MS`), so macOS does not abort long-context prefill for stalling the display (`ImpactingInteractivity`); after such an abort the restarted engine halves it, down to 500. `--prefill-mode full` always sends whole 2048-token chunks. `/status` reports it as `scheduler.prefill_bound_ms`. |
 | `--disable-ane` | Prefill on the GPU alone. Default: the 27B also uses the Neural Engine. |
 | `--max-cache-disk 16G` | Keep cached prompts on SSD when memory runs short. Off by default. |
 | `--persistent-cache` | Keep the SSD cache across restarts; needs `--max-cache-disk`. Off by default. |

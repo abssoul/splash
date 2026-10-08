@@ -679,6 +679,29 @@ void testConfiguredPrefillBoundSetsCommandLength() {
   }
 }
 
+void testPrefillBoundCoversEachCommandBuffer() {
+  // 30 ms per row with the command split into 16 buffers: a buffer of a
+  // 2048-row command holds about 3.8 s and one of 1024 rows 1.9 s, so the
+  // two-second bound per buffer keeps 1024 rows; a command of no buffers is
+  // refused.
+  engine::Scheduler scheduler(0.0);
+  scheduler.boundIsolatedPrefill(engine::kDefaultPrefillCommandMilliseconds, 16);
+  require(scheduler.snapshot().prefillBoundMilliseconds == engine::kDefaultPrefillCommandMilliseconds,
+          "snapshot did not report the per-buffer prefill bound");
+  scheduler.submit(request(1, 200'000));
+  scheduler.resourcesReady(1, 0);
+  completePrefill(scheduler, *scheduler.next({}), 2048 * 30.0);
+  require(scheduler.next({})->items[0].tokenCount == 1024,
+          "the prefill bound did not cover each of the command's buffers");
+  bool rejected = false;
+  try {
+    scheduler.boundIsolatedPrefill(engine::kDefaultPrefillCommandMilliseconds, 0);
+  } catch (const std::invalid_argument &) {
+    rejected = true;
+  }
+  require(rejected, "scheduler accepted a command of no buffers");
+}
+
 void testFullPrefillModeKeepsWholeBudget() {
   engine::Scheduler scheduler(0.0);
   scheduler.boundIsolatedPrefill(engine::kUnboundedPrefillCommand);
@@ -1199,7 +1222,8 @@ int main() {
     testMeasuredBudgetOnlyLimitsContendedWork();
     testIsolatedPrefillStaysWithinCommandBound();
     testConfiguredPrefillBoundSetsCommandLength();
-    testFullPrefillModeKeepsWholeBudget();
+    testPrefillBoundCoversEachCommandBuffer();
+  testFullPrefillModeKeepsWholeBudget();
     testAuxiliaryWorkDoesNotTrainTextPrefillTiming();
     testMeasuredBudgetUsesActualRowsAndRecovers();
     testMeasuredBudgetPreservesPriorityAndStateBoundaries();

@@ -151,16 +151,19 @@ void checkEvents(std::span<const EventStep> events, size_t dispatches) {
     size_t before = 0;
     NSUInteger signals = 0;
     for (const EventStep &step : events) {
-        if (!step.event || !step.value)
+        if (step.kind == EventStep::Kind::Break ? step.event || step.value
+                                                : !step.event || !step.value)
             throw MetalBackendError(
-                "event step needs an event and a nonzero value");
+                step.kind == EventStep::Kind::Break
+                    ? "a command buffer break takes no event"
+                    : "event step needs an event and a nonzero value");
         if (step.before < before)
             throw MetalBackendError("event steps are out of dispatch order");
         if (step.before > dispatches)
             throw MetalBackendError(
                 "event step follows more dispatches than its command has");
         before = step.before;
-        if (step.kind == EventStep::Kind::Signal) ++signals;
+        if (step.kind != EventStep::Kind::Wait) ++signals;
     }
     if (signals >= kMaximumCommandBuffers)
         throw MetalBackendError("Metal command signals more events than its "
@@ -814,6 +817,14 @@ struct MetalBackend::Impl {
                     if (encoder) {
                         [encoder endEncoding];
                         encoder = nil;
+                    }
+                    if (step->kind == EventStep::Kind::Break) {
+                        leading.push_back(command);
+                        command = [queue commandBuffer];
+                        if (!command) {
+                            failBeforeCommit("unable to create Metal command buffer");
+                        }
+                        continue;
                     }
                     id<MTLSharedEvent> event =
                         (__bridge id<MTLSharedEvent>)step->event.nativeHandle();

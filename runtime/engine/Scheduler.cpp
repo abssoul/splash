@@ -33,10 +33,13 @@ bool listed(std::span<const uint64_t> ids, uint64_t id) noexcept {
 
 } // namespace
 
-void Scheduler::boundIsolatedPrefill(double milliseconds) {
+void Scheduler::boundIsolatedPrefill(double milliseconds, uint32_t buffers) {
   if (!(milliseconds > 0.0))
     throw std::invalid_argument("prefill command bound must be positive");
+  if (!buffers)
+    throw std::invalid_argument("a prefill command has at least one buffer");
   isolatedPrefillMilliseconds_ = milliseconds;
+  isolatedPrefillBuffers_ = buffers;
 }
 
 void Scheduler::submit(RequestSpec request) {
@@ -350,9 +353,10 @@ uint32_t Scheduler::prefillBudget(
       rows /= 2;
     return rows;
   };
-  const uint32_t isolated = std::isfinite(isolatedPrefillMilliseconds_)
-                                ? boundedRows(isolatedPrefillMilliseconds_)
-                                : maximum;
+  const uint32_t isolated =
+      std::isfinite(isolatedPrefillMilliseconds_)
+          ? boundedRows(isolatedPrefillMilliseconds_ * isolatedPrefillBuffers_)
+          : maximum;
   const uint32_t rows = boundedRows(kContendedPrefillMilliseconds);
   const uint32_t leaderRemaining =
       leader.request->spec.prefillTokens - leader.promptProcessed;

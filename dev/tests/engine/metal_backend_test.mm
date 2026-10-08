@@ -1,4 +1,5 @@
 #include "../../../runtime/metal/BackendInstrumentation.hpp"
+#include "../../../runtime/metal/CommandGraph.hpp"
 #include "../../../runtime/metal/MetalBackend.hpp"
 #include "TestBuffers.hpp"
 #include "TestChecks.hpp"
@@ -36,7 +37,9 @@ using splash::metal::BufferBinding;
 using splash::metal::BufferStorage;
 using splash::metal::BytesBinding;
 using splash::metal::Command;
+using splash::metal::CommandGraph;
 using splash::metal::CommandTicket;
+using splash::metal::CommandTiming;
 using splash::metal::ComputeDispatch;
 using splash::metal::EventStep;
 using splash::metal::MetalBackend;
@@ -1315,6 +1318,47 @@ void malformedEventStepsRefused(const std::string &metallibPath) {
     std::cout << "PASS malformed event steps are refused\n";
 }
 
+// A command split into command buffers by breaks (CommandGraph::split), as
+// prefill ends one at every layer: every buffer runs, and a command of as
+// many buffers as the queue holds completes; a break that names an
+// event, and one buffer more, are refused before anything is submitted.
+void commandBreaksSplitBuffers(const std::string &metallibPath) {
+    using enum EventStep::Kind;
+    MetalBackend backend(metallibPath);
+    MetalBuffer buffer = sharedBuffer(backend, sizeof(uint32_t));
+    auto *value = static_cast<volatile uint32_t *>(buffer.contents());
+    *value = 0;
+    const uint32_t count = 1, one = 1;
+    CommandGraph graph;
+    std::vector<ComputeDispatch> chain;
+    for (uint32_t index = 0; index < 512; ++index) {
+        graph.add("test_add_u32", {buffer}, {1, 1, 1}, {1, 1, 1});
+        chain.push_back(addition(buffer, count, one));
+        if (index + 1 < 512) graph.split();
+    }
+    const std::vector<EventStep> steps(graph.command().events.begin(), graph.command().events.end());
+    require(steps.size() == 511 && steps.front().kind == Break && steps.front().before == 1 &&
+                steps.back().kind == Break && steps.back().before == 511,
+            "a graph's splits did not become breaks after their dispatches");
+    const std::vector<ComputeDispatch> dispatches(2, addition(buffer, count, one));
+    const SharedEvent event = backend.newSharedEvent();
+    rejects([&] { (void)backend.submitCommandAsync(Command{dispatches, std::vector<EventStep>{{1, event, 1, Break}}}); },
+            "takes no event", "a break naming an event was submitted");
+    std::vector<EventStep> breaks(512, EventStep{1, {}, 0, Break});
+    rejects([&] { (void)backend.submitCommandAsync(Command{dispatches, breaks}); },
+            "more events than its queue holds", "a command of 513 buffers was submitted");
+    require(backend.healthy() && BackendInstrumentation::submittedCommands(backend) == 0,
+            "a refused break marked the backend unhealthy or submitted work");
+    auto submitted =
+        std::async(std::launch::async, [&] { return backend.submitCommandAsync(Command{chain, steps}).wait(); });
+    require(submitted.wait_for(std::chrono::seconds(30)) == std::future_status::ready,
+            "a command of 512 buffers did not finish");
+    const CommandTiming timing = submitted.get();
+    require(*value == 512 && timing.gpuSeconds > 0.0 && backend.healthy(),
+            "a command split by breaks did not run every buffer");
+    std::cout << "PASS command buffer breaks split a command\n";
+}
+
 // A command of 100 signal and wait pairs, more command buffers than a queue
 // holds by default, runs in order against an agent that answers each signal:
 // a signal follows the work before it, and the work after its wait waits for
@@ -1728,6 +1772,7 @@ int main(int argc, const char *argv[]) {
             eventSteps(argv[1]);
             eventPairsRunInOrder(argv[1]);
             malformedEventStepsRefused(argv[1]);
+            commandBreaksSplitBuffers(argv[1]);
             failedBufferStillSignals(argv[1]);
             allocationDoesNotRequestResidency(argv[1]);
             residencyRacesTheHeartbeat(argv[1]);

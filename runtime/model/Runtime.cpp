@@ -2354,6 +2354,14 @@ std::shared_ptr<const CompositeState> Runtime::snapshot(uint64_t requestId) {
   return impl_->holdStraddledRows(impl_->request(requestId), std::move(state));
 }
 
+// Prefill ends a command buffer at every layer (QwenTarget::addPrefill). At
+// long contexts the attention layers take nearly all of a command, so each
+// of their buffers holds about one of them: a share of the command no larger
+// than one in their count, which shorter contexts spread over every layer.
+uint32_t Runtime::prefillCommandBuffers() const noexcept {
+  return std::max<uint32_t>(1, impl_->geometry.target.kvLayout.attentionLayers);
+}
+
 uint64_t Runtime::snapshotBytes() const noexcept {
   return impl_->states.layout().cachedBytes();
 }

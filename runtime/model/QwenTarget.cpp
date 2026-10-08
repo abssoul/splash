@@ -228,6 +228,11 @@ metal::MetalBuffer QwenTarget::addPrefill(
             addCapture(graph, geometry_, *slot, output, c.sourceStart, buffers.captured, c.destinationStart,
                        c.rows);
           }
+      // Each layer ends its Metal command buffer, so that macOS can run the
+      // display's work between a long chunk's layers instead of aborting
+      // the command (ImpactingInteractivity); prefillCommandBuffers() tells
+      // the scheduler how far that bounds a buffer.
+      if (index + 1 < geometry_.layers) graph.split();
     }
   }, weights_);
   requireLayerPartition(geometry_, step.gdnLayer, step.attentionLayer);

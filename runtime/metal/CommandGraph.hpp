@@ -58,6 +58,9 @@ public:
   void wait(SharedEvent event, uint64_t value) {
     step(std::move(event), value, EventStep::Kind::Wait);
   }
+  // Ends the Metal command buffer after the dispatches added so far; the
+  // next one runs them after it on the same queue (EventStep::Kind::Break).
+  void split() { step({}, 0, EventStep::Kind::Break); }
 
   [[nodiscard]] bool empty() const noexcept { return dispatches_.empty(); }
   // The dispatches alone; command() has the event steps too.
