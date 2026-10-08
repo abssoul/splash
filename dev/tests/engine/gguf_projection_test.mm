@@ -851,7 +851,9 @@ int main(int argc, char **argv) {
         gateUpPairs(backend, linear, tile);
       }
       prefill(backend, linear);
-      leadingInputs(backend, linear);
+      // The leading-inputs instances exist only for the MPP prefill kernels,
+      // and the Neural Engine split that reads them runs on Apple9 and later.
+      if (backend.capabilities().appleGpuFamily >= 9) leadingInputs(backend, linear);
       // The 27B out_proj then down, and gdn_in then gate/up: K 6144, 17408 and 5120.
       const SplitOperand out = splitOperand(backend, Q4K, {5120, 6144}, LinearEpilogue::Residual);
       const SplitOperand down = splitOperand(backend, Q6K, {5120, 17408}, LinearEpilogue::Residual);

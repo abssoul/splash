@@ -713,7 +713,7 @@ void preparedPipelinesCompileAhead(const std::string &metallibPath) {
     ComputeDispatch oversized = dispatch;
     oversized.threadsPerThreadgroup = {4096, 1, 1};
     rejects([&] { backend.preparePipelines({&oversized, 1}); },
-            "threadsPerThreadgroup exceeds pipeline capability",
+            "threadsPerThreadgroup 4096 exceeds pipeline 'test_add_u32' capability",
             "a dispatch past its pipeline's thread limit was prepared");
     ComputeDispatch missing = dispatch;
     missing.pipelineName = "does_not_exist";

@@ -1094,6 +1094,13 @@ int main(int argc, char **argv) {
   }
   try {
     MetalBackend backend(argv[1]);
+    // This fork runs the Neural Engine split only where it has measured it,
+    // and its Apple7/8 prefill kernels have no leading-inputs instance.
+    if (mode != "kernels" && backend.capabilities().appleGpuFamily < 9) {
+      std::cout << "ane-ffn " << mode << ": skipped on Apple GPU family "
+                << backend.capabilities().appleGpuFamily << "\n";
+      return 0;
+    }
     if (mode == "kernels") {
       std::vector<float> sign(ANE_FFN_INTERMEDIATE_BLOCK);
       for (float &value : sign) value = rng() & 1 ? -1.0f : 1.0f;
