@@ -457,8 +457,8 @@ void scratchBoundsRotated() {
 // - a split count is a power of two up to eight whose partitions keep the kernel's
 //   floor (register: one 256-input unit, staged: 512 inputs in whole 32-input
 //   groups);
-// - the staged tile spreads its walks from 16 planned cores, the register tile
-//   never;
+// - the staged tile spreads its walks from 16 planned cores on Apple10, the
+//   register tile and Apple7/8's MMA tiles never;
 // - it depends on the grid per core only: doubling the width and the core count
 //   keeps it, more cores never lower it and a wider grid never raises it;
 // - the arena bound (the single-tensor plan) covers every segment count.
@@ -488,7 +488,7 @@ void ggufCoreLaws() {
               const bool staged = c.tile == LinearTile::GgufStaged;
               require(c.tile == (family == 9 ? LinearTile::GgufRegister : LinearTile::GgufStaged) &&
                           s >= 1 && s <= 8 && (s & (s - 1)) == 0 &&
-                          c.spread == (staged && plannedGpuCores(simulatedDevice(family, cores)) >= 16),
+                          c.spread == (staged && family >= 10 && plannedGpuCores(simulatedDevice(family, cores)) >= 16),
                       "GGUF decode plan tile, split count or walk");
               require(s == 1 || (staged ? k / s >= 512 && (k / 32) % s == 0 : k / 256 / s >= 1),
                       "GGUF decode partition below the kernel floor");
