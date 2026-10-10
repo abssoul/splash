@@ -135,6 +135,10 @@ NativeArguments parseNativeArguments(int argc, const char *const *argv) {
     } else if (option == "--prefill-bound-ms") {
       if (!parsePositive(value, prefillBound) || prefillBound > kMaximumPrefillBoundMilliseconds)
         throw UsageError("--prefill-bound-ms requires 1 to 600000");
+    } else if (option == "--prefill-bound-scope") {
+      if (value != "buffer" && value != "command")
+        throw UsageError("--prefill-bound-scope requires buffer or command");
+      result.prefillBoundPerBuffer = value == "buffer";
     } else {
       throw UsageError("unexpected argument " + std::string(option));
     }

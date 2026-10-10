@@ -1588,9 +1588,15 @@ def _prefill_bound(args):
     )
 
 
-def _native_command(args, prefill_bound_ms=None):
+def _prefill_bound_scope(args):
+    return args.prefill_bound_scope or "buffer"
+
+
+def _native_command(args, prefill_bound_ms=None, prefill_bound_scope=None):
     if prefill_bound_ms is None:
         prefill_bound_ms = _prefill_bound(args)
+    if prefill_bound_scope is None:
+        prefill_bound_scope = _prefill_bound_scope(args)
     command = [
         args.binary,
         "serve-native",
@@ -1624,29 +1630,37 @@ def _native_command(args, prefill_bound_ms=None):
         command.extend(("--prefill-mode", args.prefill_mode))
     elif prefill_bound_ms != serve_options.PREFILL_BOUND_DEFAULT_MS:
         command.extend(("--prefill-bound-ms", str(prefill_bound_ms)))
+    if args.prefill_mode == "bounded" and prefill_bound_scope == "command":
+        command.extend(("--prefill-bound-scope", "command"))
     return command
 
 
 def _shorter_prefill_after_display_stall(args):
     """Relaunch command policy: macOS aborts a GPU command that holds the
     GPU while the display needs it, and how long it tolerates depends on
-    display load. Each such abort halves the bound for the next engine."""
+    the Mac and display load. Some Macs abort a long command however it is
+    split into command buffers, so the first such abort bounds whole
+    commands instead; each later one halves the bound for the next engine."""
     bound = _prefill_bound(args)
+    scope = _prefill_bound_scope(args)
 
     def command_after_failure(failure):
-        nonlocal bound
-        if (
-            args.prefill_mode != "bounded"
-            or DISPLAY_STALL_ABORT not in str(failure)
-            or bound <= PREFILL_BOUND_FLOOR_MS
-        ):
+        nonlocal bound, scope
+        if args.prefill_mode != "bounded" or DISPLAY_STALL_ABORT not in str(failure):
             return None
-        bound = max(PREFILL_BOUND_FLOOR_MS, bound // 2)
+        if scope == "buffer":
+            scope = "command"
+        elif bound <= PREFILL_BOUND_FLOOR_MS:
+            return None
+        else:
+            bound = max(PREFILL_BOUND_FLOOR_MS, bound // 2)
         print_status(
-            f"Prefill bound · {bound} ms after a macOS display-stall abort",
+            f"Prefill bound · {bound} ms per {scope} after a macOS display-stall abort",
             error=True,
         )
-        return _native_command(args, prefill_bound_ms=bound)
+        return _native_command(
+            args, prefill_bound_ms=bound, prefill_bound_scope=scope
+        )
 
     return command_after_failure
 

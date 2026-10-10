@@ -44,6 +44,9 @@ struct NativeArguments final {
   // --prefill-mode bounded|full and --prefill-bound-ms: the isolated prefill
   // command bound (Scheduler.hpp), infinite for full.
   double prefillCommandMilliseconds = EngineConfig{}.prefillCommandMilliseconds;
+  // --prefill-bound-scope buffer|command: whether that bound holds each
+  // command buffer or the whole command (EngineConfig::prefillBoundPerBuffer).
+  bool prefillBoundPerBuffer = EngineConfig{}.prefillBoundPerBuffer;
 };
 
 // Reads `serve-native MODEL_DIRECTORY MAX_CONTEXT|auto MAX_MEMORY_BYTES|auto

@@ -789,6 +789,7 @@ def main_args(**overrides):
             "kv_format": "int8",
             "prefill_mode": "bounded",
             "prefill_bound_ms": None,
+            "prefill_bound_scope": None,
             **overrides,
         }
     )
