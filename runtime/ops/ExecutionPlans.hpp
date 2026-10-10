@@ -46,12 +46,10 @@ private:
   [[nodiscard]] MoeConfig moeConfig(MoeShape shape, uint32_t rows, MoePhase phase) const;
 
   Linear linear_;
-  uint32_t moeRouteWideRows_;
   GpuFamilyClass family_;
-  // Apple7/8 have no bfloat arithmetic: their prefill and verify attention and
-  // their affine expert tiles run the register kernels.
+  // Apple7/8 have no bfloat arithmetic: their prefill and verify attention
+  // run the register kernels.
   AttentionTile attentionTile_ = AttentionTile::Mpp;
-  MoeExpertKernel moeExpertKernel_ = MoeExpertKernel::Mpp;
 };
 
 } // namespace splash::ops
