@@ -317,9 +317,25 @@ metal::MetalBuffer QwenTarget::addPrefillMixer(PrefillStep &step, const QwenAtte
         sequence.rows, sequence.attentionStride, geometry_.attentionQueryHeads, geometry_.kvLayout);
     ops::PagedAttention::addPrefillStore(step.graph, step.kvLayers[layer], keys, values, sequence.pageTable,
                                          sequence.chunk, geometry_.kvLayout);
-    ops::PagedAttention::addPrefill(
-        step.graph, step.kvLayers[layer], queries, attentionRows, b.attentionPartials, b.attentionStatistics,
-        sequence.pageTable, sequence.chunk, step.attention[index]);
+    // At long history the chunk attends in pieces of rows, each a short
+    // dispatch (ops::prefillAttentionPieceRows); a piece's queries and output
+    // start its first row into every KV head's block of the stride.
+    const uint32_t pieceRows = ops::prefillAttentionPieceRows(sequence.chunk.committed_tokens, sequence.rows);
+    const uint64_t pieceRowBytes = uint64_t{geometry_.attentionQueryHeads / geometry_.attentionKvHeads} *
+                                   geometry_.attentionHeadDimension * sizeof(uint16_t);
+    for (uint32_t begin = 0; begin < sequence.rows; begin += pieceRows) {
+      kv::ChunkedPrefillParams piece = sequence.chunk;
+      piece.committed_tokens += begin;
+      piece.chunk_tokens = std::min(pieceRows, sequence.rows - begin);
+      const uint64_t offset = begin * pieceRowBytes;
+      ops::PagedAttention::addPrefill(
+          step.graph, step.kvLayers[layer], begin ? backend_.view(queries, offset, queryBytes - offset) : queries,
+          begin ? backend_.view(attentionRows, offset, queryBytes - offset) : attentionRows, b.attentionPartials,
+          b.attentionStatistics, sequence.pageTable, piece,
+          piece.chunk_tokens == sequence.rows
+              ? step.attention[index]
+              : operators_.prefillAttention(piece.chunk_tokens, geometry_.attentionQueryHeads, geometry_.kvLayout));
+    }
     ops::PagedAttention::addPrefillGate(
         step.graph, u16(b.fullPacked, geometry_.packedFullWidth), attentionRows,
         u16(b.attentionHidden, geometry_.attentionWidth), sequence.rows, sequence.attentionStride,
