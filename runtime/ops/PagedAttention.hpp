@@ -94,6 +94,24 @@ chunkedPrefillValidationError(const ChunkedPrefillParams &params) noexcept {
 
 namespace splash::ops {
 
+// The GPU finishes a dispatch before it serves the display, and macOS aborts
+// a command that keeps the display waiting too long (Apple7/8 Macs at long
+// context). A chunk's prefill attention therefore goes in pieces of rows of
+// at most about this many row-history pairs, each its own dispatch.
+inline constexpr uint64_t kPrefillAttentionPieceWork = uint64_t{1} << 25;
+
+// Rows of each prefill attention piece of a chunk of `rows` rows after
+// `committedTokens` of history: the chunk itself while short, else halved
+// down to one tile.
+[[nodiscard]] constexpr uint32_t prefillAttentionPieceRows(uint32_t committedTokens,
+                                                           uint32_t rows) noexcept {
+  uint32_t piece = kv::kChunkedPrefillMaximumRows;
+  while (piece > kv::kPrefillAttentionTileRows &&
+         uint64_t{piece} * (uint64_t{committedTokens} + piece) > kPrefillAttentionPieceWork)
+    piece /= 2;
+  return piece < rows ? piece : rows;
+}
+
 struct AttentionWorkspace final {
   uint64_t partialsBytes = 0;
   uint64_t statisticsBytes = 0;
