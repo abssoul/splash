@@ -691,8 +691,14 @@ void dispatchProfilingCoversEveryCommand(const std::string &metallibPath) {
     rejects([&] { (void)backend.submitCommandAsync(Command{pair, {&step, 1}}); },
             "does not replay event steps",
             "profiling replayed a command without its event steps");
+    // A Break is only a command boundary, which profiled dispatches have anyway.
+    const EventStep split{1, {}, 0, EventStep::Kind::Break};
+    auto broken = backend.submitCommandAsync(Command{pair, {&split, 1}});
+    require(broken.ready() && BackendInstrumentation::takeDispatchProfile(backend).size() == 2,
+            "a command split by a Break was not profiled");
+    (void)broken.wait();
     BackendInstrumentation::setDispatchProfiling(backend, false);
-    require(*value == 5, "profiling did not run each dispatch exactly once");
+    require(*value == 7, "profiling did not run each dispatch exactly once");
     std::cout << "PASS dispatch profiling covers every command\n";
 }
 

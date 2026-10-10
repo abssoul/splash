@@ -1329,7 +1329,12 @@ CommandTicket MetalBackend::submitCommandAsync(const Command &command,
     checkOperation();
 #ifdef SPLASH_BACKEND_INSTRUMENTATION
     if (impl_->dispatchProfiling) {
-        if (!command.events.empty())
+        // Profiled dispatches run as commands of their own, so a Break
+        // (a command boundary) needs no replay; signals and waits do.
+        if (std::any_of(command.events.begin(), command.events.end(),
+                        [](const EventStep &step) {
+                            return step.kind != EventStep::Kind::Break;
+                        }))
             throw MetalBackendError(
                 "dispatch profiling does not replay event steps");
         return impl_->submitProfiled(command.dispatches, std::move(completion));
