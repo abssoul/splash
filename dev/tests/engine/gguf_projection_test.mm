@@ -895,7 +895,10 @@ int main(int argc, char **argv) {
       }
       decodeTile(backend, linear, LinearTile::GgufStaged, true);
       fusedDecode(backend, linear, LinearTile::GgufStaged, true);
-      for (const bool spread : {false, true}) oneGateUpPass(backend, linear, spread);
+      // The one-pass gate/up runs on large Apple10 GPUs only (Linear::ggufBaseline); Apple7/8's two passes run their
+      // MMA kernels, whose bits it does not match.
+      if (backend.capabilities().appleGpuFamily >= 9)
+        for (const bool spread : {false, true}) oneGateUpPass(backend, linear, spread);
       prefill(backend, linear);
       leadingInputs(backend, linear);
       // The 27B out_proj then down, and gdn_in then gate/up: K 6144, 17408 and 5120.

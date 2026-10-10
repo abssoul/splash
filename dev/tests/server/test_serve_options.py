@@ -410,7 +410,13 @@ class ServeOptionsTests(unittest.TestCase):
             "--prefill-bound-scope",
             api._native_command(
                 api.parse_args(
-                    [*required, "--prefill-mode", "full", "--prefill-bound-scope", "command"]
+                    [
+                        *required,
+                        "--prefill-mode",
+                        "full",
+                        "--prefill-bound-scope",
+                        "command",
+                    ]
                 )
             ),
         )
@@ -472,7 +478,13 @@ class ServeOptionsTests(unittest.TestCase):
             self.assertIsNone(policy(api.engine_runtime.EngineUnhealthy("GPU is gone")))
             self.assertEqual(
                 bounds(policy, 5),
-                [("command", "2000"), ("command", "1000"), ("command", "500"), None, None],
+                [
+                    ("command", "2000"),
+                    ("command", "1000"),
+                    ("command", "500"),
+                    None,
+                    None,
+                ],
             )
             self.assertEqual(status.call_count, 3)
             # Whole commands from the start: the first abort halves already.
