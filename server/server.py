@@ -1658,9 +1658,7 @@ def _shorter_prefill_after_display_stall(args):
             f"Prefill bound · {bound} ms per {scope} after a macOS display-stall abort",
             error=True,
         )
-        return _native_command(
-            args, prefill_bound_ms=bound, prefill_bound_scope=scope
-        )
+        return _native_command(args, prefill_bound_ms=bound, prefill_bound_scope=scope)
 
     return command_after_failure
 
