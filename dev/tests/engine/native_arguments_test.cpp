@@ -144,6 +144,7 @@ void testServerCommandLines(const char *path) {
          read.prefillCommandMilliseconds = engine::kUnboundedPrefillCommand;
        }},
       {"prefill_bound", [](NativeArguments &read) { read.prefillCommandMilliseconds = 3000.0; }},
+      {"prefill_bound_command", [](NativeArguments &read) { read.prefillBoundPerBuffer = false; }},
   };
   // Every field but the model inspected from the directory.
   const auto same = [](const NativeArguments &read, const NativeArguments &meant) {
@@ -156,7 +157,8 @@ void testServerCommandLines(const char *path) {
            read.idleReleaseSeconds == meant.idleReleaseSeconds &&
            read.preventIdleSleep == meant.preventIdleSleep &&
            read.neuralEngine == meant.neuralEngine &&
-           read.prefillCommandMilliseconds == meant.prefillCommandMilliseconds;
+           read.prefillCommandMilliseconds == meant.prefillCommandMilliseconds &&
+           read.prefillBoundPerBuffer == meant.prefillBoundPerBuffer;
   };
   const auto golden = readGolden(path);
   require(golden.size() == changes.size(),

@@ -53,6 +53,11 @@ struct EngineConfig final {
   // them for starving the display; kUnboundedPrefillCommand sends
   // full-budget commands.
   double prefillCommandMilliseconds = kDefaultPrefillCommandMilliseconds;
+  // Whether that bound holds each command buffer of a prefill command
+  // (model::Model::prefillCommandBuffers()) or the whole command. Some Macs
+  // abort a long command for starving the display however it is split, and
+  // need the whole command short.
+  bool prefillBoundPerBuffer = true;
   // The prefill checkpoint interval and the resource wait limit.
   uint32_t prefillCheckpointTokens = kPrefillCheckpointTokens;
   double resourceWaitTimeoutMilliseconds = kResourceWaitTimeoutMilliseconds;

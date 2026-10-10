@@ -190,6 +190,16 @@ def parse_prefill_bound(value):
     return result
 
 
+PREFILL_BOUND_SCOPES = ("buffer", "command")
+
+
+def parse_prefill_bound_scope(value):
+    """buffer or command."""
+    if value not in PREFILL_BOUND_SCOPES:
+        raise argparse.ArgumentTypeError("must be buffer or command")
+    return value
+
+
 def parse_idle_release(value):
     """--idle-release in seconds, math.inf for off."""
     if value.strip().lower() == "off":
@@ -566,9 +576,23 @@ SERVE_OPTIONS = (
             metavar="MILLISECONDS",
             help="longest bounded prefill GPU command buffer in milliseconds (default: "
             f"SPLASH_PREFILL_BOUND_MS or {PREFILL_BOUND_DEFAULT_MS}); halved after "
-            "each macOS display-stall abort",
+            "each macOS display-stall abort once the bound holds whole commands",
         ),
         environment="SPLASH_PREFILL_BOUND_MS",
+    ),
+    ServeOption(
+        "--prefill-bound-scope",
+        "requests",
+        dict(
+            type=parse_prefill_bound_scope,
+            default=None,
+            metavar="buffer|command",
+            help="what the prefill bound holds: each GPU command buffer "
+            "(default: SPLASH_PREFILL_BOUND_SCOPE or buffer) or each whole "
+            "command, which some Macs need at long context; the first macOS "
+            "display-stall abort switches to command",
+        ),
+        environment="SPLASH_PREFILL_BOUND_SCOPE",
     ),
     ServeOption(
         "--disable-ane",

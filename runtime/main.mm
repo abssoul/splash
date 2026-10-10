@@ -154,7 +154,8 @@ void printUsage(std::string_view executable) {
       " [--kv-format int8|bf16] [--decode-share SHARE]"
       " [--max-image-patches PATCHES] [--cache-dir DIRECTORY]"
       " [--idle-release SECONDS|off] [--idle-sleep prevent|allow] [--ane on|off]"
-      " [--prefill-mode bounded|full] [--prefill-bound-ms MILLISECONDS]");
+      " [--prefill-mode bounded|full] [--prefill-bound-ms MILLISECONDS]"
+      " [--prefill-bound-scope buffer|command]");
   writeStderrLine("       " + command + " model-check mlx-affine none|safetensors CONFIG [DRAFT_CONFIG]");
   writeStderrLine("       " + command + " model-check gguf none|gguf CONFIG GGUF_METADATA [DRAFT_CONFIG]");
   writeStderrLine("       " + command + " device-check");
@@ -196,6 +197,7 @@ bootstrapConfig(const engine::NativeArguments &arguments) {
   config.nativeLoop.engine.maxContext = arguments.maxContext;
   config.nativeLoop.engine.decodeShare = arguments.decodeShare;
   config.nativeLoop.engine.prefillCommandMilliseconds = arguments.prefillCommandMilliseconds;
+  config.nativeLoop.engine.prefillBoundPerBuffer = arguments.prefillBoundPerBuffer;
   return config;
 }
 

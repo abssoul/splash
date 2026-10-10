@@ -61,6 +61,11 @@ OPTIONS = {
         {"1": 1, "3000": 3000, "600000": 600000},
         ("0", "-5", "2s", "600001", "1.5"),
     ),
+    "--prefill-bound-scope": values(
+        "--prefill-bound-scope",
+        {"buffer": "buffer", "command": "command"},
+        ("layer", "", "Command"),
+    ),
     "--disable-ane": ([(["--disable-ane"], True)], []),
     "--max-memory": values(
         "--max-memory",
@@ -387,12 +392,37 @@ class ServeOptionsTests(unittest.TestCase):
         )
         with mock.patch.dict(os.environ, {"SPLASH_PREFILL_BOUND_MS": "1500"}):
             self.assertEqual(api.parse_args(required).prefill_bound_ms, 1500)
+        # The bound holds each command buffer unless told to hold whole
+        # commands; full mode has no bound to scope.
+        self.assertIsNone(args.prefill_bound_scope)
+        self.assertNotIn("--prefill-bound-scope", api._native_command(args))
+        self.assertNotIn(
+            "--prefill-bound-scope",
+            api._native_command(
+                api.parse_args([*required, "--prefill-bound-scope", "buffer"])
+            ),
+        )
+        command_args = api.parse_args([*required, "--prefill-bound-scope", "command"])
+        self.assertEqual(
+            api._native_command(command_args)[-2:], ["--prefill-bound-scope", "command"]
+        )
+        self.assertNotIn(
+            "--prefill-bound-scope",
+            api._native_command(
+                api.parse_args(
+                    [*required, "--prefill-mode", "full", "--prefill-bound-scope", "command"]
+                )
+            ),
+        )
+        with mock.patch.dict(os.environ, {"SPLASH_PREFILL_BOUND_SCOPE": "command"}):
+            self.assertEqual(api.parse_args(required).prefill_bound_scope, "command")
         for invalid in (
             ["--prefill-mode", "fast"],
             ["--prefill-bound-ms", "0"],
             ["--prefill-bound-ms", "-5"],
             ["--prefill-bound-ms", "2s"],
             ["--prefill-bound-ms", "600001"],
+            ["--prefill-bound-scope", "layer"],
         ):
             with (
                 self.subTest(invalid=invalid),
@@ -401,7 +431,7 @@ class ServeOptionsTests(unittest.TestCase):
             ):
                 api.parse_args([*required, *invalid])
 
-    def test_display_stall_halves_the_prefill_bound_to_its_floor(self):
+    def test_display_stall_bounds_whole_commands_then_halves_to_the_floor(self):
         package = api.ROOT / "install/models/community/custom-splash"
         required = [
             str(package),
@@ -415,19 +445,44 @@ class ServeOptionsTests(unittest.TestCase):
             "Impacting Interactivity "
             "(0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)"
         )
+
+        def bounds(policy, aborts):
+            """(scope, bound) of each relaunch, None where the policy gives up."""
+            seen = []
+            for _ in range(aborts):
+                command = policy(stall)
+                if command is None:
+                    seen.append(None)
+                    continue
+                scope = (
+                    command[command.index("--prefill-bound-scope") + 1]
+                    if "--prefill-bound-scope" in command
+                    else "buffer"
+                )
+                bound = (
+                    command[command.index("--prefill-bound-ms") + 1]
+                    if "--prefill-bound-ms" in command
+                    else "2000"
+                )
+                seen.append((scope, bound))
+            return seen
+
         with mock.patch.object(api, "print_status") as status:
             policy = api._shorter_prefill_after_display_stall(api.parse_args(required))
             self.assertIsNone(policy(api.engine_runtime.EngineUnhealthy("GPU is gone")))
-            bounds = []
-            for _ in range(4):
-                command = policy(stall)
-                bounds.append(
-                    None
-                    if command is None
-                    else command[command.index("--prefill-bound-ms") + 1]
-                )
-            self.assertEqual(bounds, ["1000", "500", None, None])
-            self.assertEqual(status.call_count, 2)
+            self.assertEqual(
+                bounds(policy, 5),
+                [("command", "2000"), ("command", "1000"), ("command", "500"), None, None],
+            )
+            self.assertEqual(status.call_count, 3)
+            # Whole commands from the start: the first abort halves already.
+            command_policy = api._shorter_prefill_after_display_stall(
+                api.parse_args([*required, "--prefill-bound-scope", "command"])
+            )
+            self.assertEqual(
+                bounds(command_policy, 3),
+                [("command", "1000"), ("command", "500"), None],
+            )
             full = api._shorter_prefill_after_display_stall(
                 api.parse_args([*required, "--prefill-mode", "full"])
             )
