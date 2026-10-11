@@ -91,7 +91,10 @@ automatically:
 Unsloth GGUF variants span **1–8 bits**, including mixed-precision UD formats;
 `UD-Q8_K_XL` and BF16 targets are not supported.
 [Prism ML Ternary Bonsai 2](https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf)
-is also supported in PQ2_0 (7.2 GB), including vision. Pass `OWNER/REPO:VARIANT`
+is also supported in PQ2_0 (7.2 GB), including vision, and so are
+[ISTA-DASLab's GSQ-RCO GGUFs](https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF)
+of the 27B, 8.4 to 11.8 GB (`ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF:IQ3_XXS`
+for a 24 GB Mac), including vision. Pass `OWNER/REPO:VARIANT`
 to `--model`, as in the quick start. MLX targets must be affine 4-bit with
 groups of 64, like the examples. Smaller variants run on
 [24 GB Macs](docs/performance.md#smaller-ggufs-on-24-gb-macs).

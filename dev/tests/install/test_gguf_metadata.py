@@ -382,7 +382,7 @@ class GgufMetadataTests(unittest.TestCase):
                 },
                 "attn_qkv.weight BF16 [(]2 tensors[)]",
             ),
-            ({"token_embd.weight": GGML["IQ2_XXS"]}, "token_embd.weight IQ2_XXS"),
+            ({"token_embd.weight": GGML["MXFP4"]}, "token_embd.weight MXFP4"),
             ({"blk.3.attn_q.weight": GGML["BF16"]}, "attn_q.weight BF16"),
             # F32 only where the loader reads floats: not a projection, not
             # a quantized router or norm, not half an alpha/beta pair.
