@@ -122,8 +122,10 @@ inline void gemm(device const bfloat *input, device const bfloat *weights,
 // in the fragment layout PV = V^T P^T takes as its B operand, so the online
 // softmax runs in registers; P is rounded to bf16 as the MPP kernel rounds
 // its probabilities, and the row sums keep the unrounded exponents.
-constexpr constant uint kRows = 64, kKeys = 32, kHeadDim = 72, kQkDim = 80;
+constexpr constant uint kRows = SPLASH_VISION_ATTENTION_MMA_ROWS, kKeys = 32, kHeadDim = 72, kQkDim = 80;
 constexpr constant uint kKeyStride = 84, kValueStride = 76;  // bank-spread rows
+constexpr constant uint kThreads = SPLASH_VISION_ATTENTION_MMA_THREADS;
+static_assert(kThreads / 32 * 8 == kRows, "eight rows per simdgroup");
 
 inline void attention(device const bfloat *queries, device const bfloat *keys,
                       device const bfloat *values, device bfloat *output,
@@ -152,7 +154,7 @@ inline void attention(device const bfloat *queries, device const bfloat *keys,
   for (uint base = 0; base < context; base += kKeys) {
     threadgroup_barrier(mem_flags::mem_threadgroup);
     // 32 x 80 keys and 32 x 72 values: 320 and 288 runs of eight bf16.
-    for (uint u = thread_index; u < kKeys * (kQkDim + kHeadDim) / 8; u += 256) {
+    for (uint u = thread_index; u < kKeys * (kQkDim + kHeadDim) / 8; u += kThreads) {
       const bool key = u < kKeys * kQkDim / 8;
       const uint e = 8 * (key ? u : u - kKeys * kQkDim / 8);
       const uint dim = key ? kQkDim : kHeadDim;

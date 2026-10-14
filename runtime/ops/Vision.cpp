@@ -198,6 +198,10 @@ void Vision::encode(CommandGraph &graph, ImageGrid grid,
   const MetalBuffer &normalized = scratch(Scratch::Normalized);
   const MetalBuffer &qkv = scratch(Scratch::Qkv);
   const MetalBuffer &context = scratch(Scratch::Context);
+  const uint32_t attentionRows =
+      mma_ ? SPLASH_VISION_ATTENTION_MMA_ROWS : SPLASH_VISION_ATTENTION_ROWS;
+  const uint32_t attentionThreads =
+      mma_ ? SPLASH_VISION_ATTENTION_MMA_THREADS : SPLASH_VISION_ATTENTION_THREADS;
 
   graph.add("vision_patchify", {pixels, scratch(Scratch::Patches)}, gridParams,
             {tokens, 1, 1});
@@ -226,10 +230,8 @@ void Vision::encode(CommandGraph &graph, ImageGrid grid,
               {scratch(Scratch::Queries), scratch(Scratch::Keys),
                scratch(Scratch::Values), scratch(Scratch::Attention)},
               attentionParams,
-              {(tokens + SPLASH_VISION_ATTENTION_ROWS - 1) /
-                   SPLASH_VISION_ATTENTION_ROWS,
-               layout.heads, 1},
-              {SPLASH_VISION_ATTENTION_THREADS, 1, 1});
+              {(tokens + attentionRows - 1) / attentionRows, layout.heads, 1},
+              {attentionThreads, 1, 1});
     graph.add("vision_attention_gather", {scratch(Scratch::Attention), context},
               qkvParams, {tokens, 1, 1});
     addGemm(graph, "m64n128_residual", context, block.projection, hidden,

@@ -1,5 +1,6 @@
-// vision_attention (kernels/shared/vision.metal) against an fp64 reference,
-// row by row. Token counts fall below, on and past its 32-row query tile and
+// vision_attention (kernels/shared/vision.metal) and its Apple7/8 register
+// tile vision_attention_mma (kernels/shared/vision_mma.metal) against an fp64
+// reference, row by row. Token counts fall below, on and past its 32-row query tile and
 // 128-key tile, up to 4,100 (33 key tiles, the last of four keys), and each
 // runs three kinds of input: random queries, keys and values; keys whose
 // scores rise tile by tile, so every row rescales its running output at
@@ -243,7 +244,18 @@ HeadCheck checkHead(Kind kind, uint32_t tokens, uint32_t padded, float scale, ui
 
 // One image of `tokens` patches: the encoder's attention dispatch over
 // tensors at their extents, checked head by head.
-void runCase(MetalBackend &backend, Kind kind, uint32_t tokens) {
+struct Kernel {
+  const char *name;
+  uint32_t rows;
+  uint32_t threads;
+};
+
+constexpr Kernel kKernels[] = {
+    {"vision_attention", SPLASH_VISION_ATTENTION_ROWS, SPLASH_VISION_ATTENTION_THREADS},
+    {"vision_attention_mma", SPLASH_VISION_ATTENTION_MMA_ROWS, SPLASH_VISION_ATTENTION_MMA_THREADS},
+};
+
+void runCase(MetalBackend &backend, const Kernel &kernel, Kind kind, uint32_t tokens) {
   const uint32_t padded = (tokens + kKeyTile - 1) / kKeyTile * kKeyTile;
   const uint64_t rows = uint64_t{kHeads} * padded;
   const Tensor queries(backend, rows, kQkDimension), keys(backend, rows, kQkDimension);
@@ -251,12 +263,12 @@ void runCase(MetalBackend &backend, Kind kind, uint32_t tokens) {
   fill(kind, tokens, padded, queries, keys, values);
   const VisionAttentionParams params{tokens, padded, 1.0F / std::sqrt(static_cast<float>(kHeadDimension))};
   CommandGraph graph;
-  graph.add("vision_attention", {queries.view, keys.view, values.view, output.view}, params,
-            {(tokens + SPLASH_VISION_ATTENTION_ROWS - 1) / SPLASH_VISION_ATTENTION_ROWS, kHeads, 1},
-            {SPLASH_VISION_ATTENTION_THREADS, 1, 1});
+  graph.add(kernel.name, {queries.view, keys.view, values.view, output.view}, params,
+            {(tokens + kernel.rows - 1) / kernel.rows, kHeads, 1}, {kernel.threads, 1, 1});
   static_cast<void>(backend.submitCommandAsync(graph.dispatches()).wait());
 
-  const std::string label = std::string(kindName(kind)) + " tokens " + std::to_string(tokens);
+  const std::string label =
+      std::string(kernel.name) + " " + kindName(kind) + " tokens " + std::to_string(tokens);
   require(queries.tailIntact() && keys.tailIntact() && values.tailIntact() && output.tailIntact(),
           label + ": a write reached past a tensor's extent");
   std::vector<std::future<HeadCheck>> checks;
@@ -278,7 +290,7 @@ void runCase(MetalBackend &backend, Kind kind, uint32_t tokens) {
   }
   require(kind != Kind::Rising || !steadyTiles,
           label + ": " + std::to_string(steadyTiles) + " row tiles of rising keys kept their maximum");
-  std::printf("vision_attention %s: worst error %.3f of its bound (head %u row %u)\n", label.c_str(), worst,
+  std::printf("%s: worst error %.3f of its bound (head %u row %u)\n", label.c_str(), worst,
               worstHead, worstRow);
 }
 
@@ -289,9 +301,10 @@ int main(int argc, char **argv) {
     try {
       require(argc == 2, "usage: vision-attention METALLIB");
       MetalBackend backend(argv[1]);
-      for (const uint32_t tokens : {4U, 24U, 36U, 124U, 128U, 132U, 144U, 260U, 4100U})
-        for (const Kind kind : {Kind::Random, Kind::Rising, Kind::Wide})
-          runCase(backend, kind, tokens);
+      for (const Kernel &kernel : kKernels)
+        for (const uint32_t tokens : {4U, 24U, 36U, 124U, 128U, 132U, 144U, 260U, 4100U})
+          for (const Kind kind : {Kind::Random, Kind::Rising, Kind::Wide})
+            runCase(backend, kernel, kind, tokens);
       std::cout << "vision_attention_metal_test: PASS\n";
       return 0;
     } catch (const std::exception &error) {
