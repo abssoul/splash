@@ -1,14 +1,13 @@
 #pragma once
 
 #include "metal/MetalBackend.hpp"
+#include "metal/abi/QuantFormat.h"
 
 #include <compare>
 #include <cstdint>
 #include <stdexcept>
 #include <utility>
 #include <vector>
-
-struct QuantFormat;
 
 namespace splash::ops {
 
@@ -18,6 +17,10 @@ struct ProjectionShape final {
   // Its quantized segments multiply the rotated input (InputRotation), which
   // takes LinearScratch::rotated.
   bool rotated = false;
+  // Its quantized segments are all in formats the Apple9 register tile takes
+  // (quant_register_format); a projection with one in another format stages
+  // whatever its rows (Linear::decodeStorageRows).
+  bool registerFormats = true;
   auto operator<=>(const ProjectionShape &) const = default;
 };
 
@@ -98,7 +101,10 @@ public:
 
   [[nodiscard]] const BlockWeights &blocks() const noexcept { return weights_; }
   [[nodiscard]] ProjectionShape shape() const noexcept {
-    return {outputSize, inputSize, static_cast<bool>(rotation)};
+    bool registerFormats = true;
+    for (const QuantizedSegment &s : weights_.segments)
+      registerFormats &= s.isFloat() || quant_register_format(s.formatId);
+    return {outputSize, inputSize, static_cast<bool>(rotation), registerFormats};
   }
 
   // Views of a projection of one unrotated quantized tensor (Linear.cpp):
@@ -129,15 +135,18 @@ private:
   uint32_t planeInputs_ = 0;
 };
 
-// A token table's rows as the GGUF stores them, in a gguf_embedding_format
-// (metal/abi/Gguf.h), gathered, never multiplied (Embedding.cpp). A default
-// value holds no rows, which a reader replaces.
+// A token table's rows as stored, gathered, never multiplied (Embedding.cpp):
+// native blocks of a gguf_embedding_format (metal/abi/Gguf.h), BF16 and F16
+// values among them, which a GGUF or a safetensors checkpoint may keep
+// unquantized. A default value holds no rows, which a reader replaces.
 struct NativeRows final {
   NativeRows() = default;
+  // Rows of a gguf_embedding_format; throws for any other formatId.
   NativeRows(metal::MetalBuffer rows, uint32_t formatId);
   metal::MetalBuffer rows;
   uint32_t formatId = 0;
-  [[nodiscard]] const char *name() const noexcept;
+  // Its format's native block and kernel name suffix.
+  [[nodiscard]] const QuantFormat &format() const noexcept;
 };
 
 // A token table of outputSize rows of inputSize values, which Embedding

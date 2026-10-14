@@ -260,6 +260,7 @@ ENGINE_CPP_SOURCES := \
 	runtime/engine/KvCache.cpp \
 	runtime/engine/KvPageTier.cpp \
 	runtime/engine/CacheDirectory.cpp \
+	runtime/engine/DiskSpace.cpp \
 	runtime/engine/StateCache.cpp \
 	runtime/model/DraftContextPlan.cpp \
 	runtime/engine/Protocol.cpp \
@@ -272,8 +273,8 @@ ENGINE_CPP_SOURCES := \
 	runtime/model/GgufFile.cpp \
 	runtime/model/GgufImage.cpp \
 	runtime/model/GgufTarget.cpp \
-	runtime/model/MlxImage.cpp \
-	runtime/model/MlxTarget.cpp \
+	runtime/model/SafetensorsImage.cpp \
+	runtime/model/SafetensorsTarget.cpp \
 	runtime/model/DraftCheckpoint.cpp \
 	runtime/model/WeightSource.cpp \
 	runtime/model/WeightImages.cpp \

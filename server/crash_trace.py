@@ -82,12 +82,6 @@ class CrashTraceRing:
         self._dumped_generation = 0
         self._last_dump: Path | None = None
 
-    def replace_command(self, command: Sequence[str]) -> None:
-        """Record the command of the engine about to start; a relaunch may
-        change its arguments."""
-        with self._lock:
-            self._command = tuple(command)
-
     @property
     def active(self) -> bool:
         # Production subprocesses always have an exact replay command. Test
@@ -99,10 +93,17 @@ class CrashTraceRing:
         with self._lock:
             return self._last_dump
 
-    def start_generation(self, generation: int, pid: int) -> None:
+    def start_generation(
+        self, generation: int, pid: int, command: Sequence[str] | None = None
+    ) -> None:
+        """Record `generation`, process `pid`, which `command` started when
+        given: a relaunch's keeps the first engine's context, so that its
+        replay runs as the relaunch did."""
         if not self.active:
             return
         with self._lock:
+            if command:
+                self._command = tuple(command)
             self._generation = generation
             self._pid = pid
             self._started_ns = time.monotonic_ns()
@@ -153,6 +154,7 @@ class CrashTraceRing:
             self._dumped_generation = generation
             started_ns = self._started_ns
             pid = self._pid
+            command = self._command
             entries = tuple(self._entries)
         document = {
             "schema_version": TRACE_SCHEMA_VERSION,
@@ -160,7 +162,7 @@ class CrashTraceRing:
             "generation": generation,
             "pid": pid,
             "process_returncode": process_returncode,
-            "command": list(self._command),
+            "command": list(command),
             "error": {
                 "type": type(error).__name__,
                 "message": str(error),

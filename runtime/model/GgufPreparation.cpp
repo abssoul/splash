@@ -1,7 +1,7 @@
 #include "model/GgufPreparation.hpp"
 
+#include "metal/abi/Gguf.h"
 #include "metal/abi/GgufRepack.h"
-#include "metal/abi/QuantTables.h"
 #include "model/Bfloat16.hpp"
 #include "model/GgufImageLayout.hpp"
 #include "model/WeightImages.hpp"
@@ -27,7 +27,7 @@ static_assert(kGgufRepackStagingBytes <= std::numeric_limits<uint32_t>::max());
 // The source row image row `row` of `rows` is read from.
 uint64_t sourceRow(const gguf::TensorRows &rows, uint64_t row) {
   const gguf::RowOrder &order = rows.order;
-  if (row < order.from) return row;
+  if (row < order.from) return rows.first + row;
   if (!order.headRows || !order.keyHeads || !order.valueHeadsPerKey)
     throw GgufError("invalid weight row permutation");
   const uint64_t head = (row - order.from) / order.headRows;
@@ -35,7 +35,7 @@ uint64_t sourceRow(const gguf::TensorRows &rows, uint64_t row) {
       ((head % order.valueHeadsPerKey) * order.keyHeads + head / order.valueHeadsPerKey) * order.headRows +
       (row - order.from) % order.headRows;
   if (source >= rows.rows) throw GgufError("weight row permutation is out of bounds");
-  return source;
+  return rows.first + source;
 }
 
 void requireRange(uint64_t offset, uint64_t bytes, uint64_t available) {
@@ -43,48 +43,97 @@ void requireRange(uint64_t offset, uint64_t bytes, uint64_t available) {
     throw GgufError("prepared weight section is out of bounds");
 }
 
-// The format of an MLX quantized tensor's native rows.
-const QuantFormat &mlxFormat(const gguf::TensorRows &rows) {
+// How readRows reads a tensor's rows: as stored, or as its format's native
+// rows, which it builds from a quantized safetensors tensor's tensors, from
+// llama.cpp's NVFP4 rows, or by quantizing a BF16 weight.
+enum class RowReader : uint8_t { Stored, Safetensors, GgufNvfp4, QuantizedBfloat16 };
+RowReader rowReader(const gguf::TensorRows &rows) {
+  if (rows.safetensors.codes) return RowReader::Safetensors;
+  if (rows.ggufNvfp4RowBytes) return RowReader::GgufNvfp4;
+  if (rows.safetensors.bfloat16) return RowReader::QuantizedBfloat16;
+  return RowReader::Stored;
+}
+
+// The format of the native rows a reader builds (rowReader).
+const QuantFormat &nativeFormat(const gguf::TensorRows &rows) {
   const uint32_t format = gguf_format_of(rows.type);
-  if (!quant_affine_format(format) && format != GGUF_FMT_MXFP4)
-    throw GgufError("not an MLX quantized tensor: " + rows.name);
+  if (!gguf::safetensorsFormat(format)) throw GgufError("not a format the loader builds: " + rows.name);
   return kQuantFormats[format];
 }
 
-// Native bytes [column, column + span) of `count` source rows of an MLX
-// quantized tensor from source row `start` on, back to back, read from its
-// tensors: per group an affine tensor's scale, bias and codes, or an mxfp4
-// tensor's block_mxfp4, its exponent and its codes with element j in the low
-// nibble of byte j % 16 when j < 16, else in its high nibble (MLX packs
-// element j at bits 4 j of the row).
-void readMlxRows(const gguf::TensorRows &rows, uint64_t start, uint64_t count, uint64_t column, uint64_t span,
+// The tensor scale g of source rows [start, start + count), each finite
+// (gguf::TensorScale); 1 for rows without one.
+std::vector<float> tensorScales(const gguf::TensorRows &rows, uint64_t start, uint64_t count) {
+  const gguf::TensorScale &scale = rows.scale;
+  if (!scale.rowsPerValue) return std::vector<float>(count, 1.0F);
+  const uint64_t valueBytes = scale.bfloat16 ? 2 : 4, first = start / scale.rowsPerValue;
+  std::vector<uint8_t> bytes(((start + count - 1) / scale.rowsPerValue - first + 1) * valueBytes);
+  if (first * valueBytes > scale.bytes || bytes.size() > scale.bytes - first * valueBytes)
+    throw GgufError("tensor scale of " + rows.name + " is out of bounds");
+  scale.file->readData(scale.offset + first * valueBytes, bytes);
+  std::vector<float> result(count);
+  for (uint64_t row = 0; row < count; ++row) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, bytes.data() + ((start + row) / scale.rowsPerValue - first) * valueBytes, valueBytes);
+    float value = scale.bfloat16 ? widenBfloat16(uint16_t(bits)) : std::bit_cast<float>(bits);
+    if (scale.reciprocal) value = 1.0F / value;
+    if (!std::isfinite(value)) throw GgufError("non-finite tensor scale of " + rows.name);
+    result[row] = value;
+  }
+  return result;
+}
+
+// Native bytes [column, column + span) of `count` source rows of a quantized
+// safetensors tensor from source row `start` on, back to back, read from its
+// tensors: per native block an affine tensor's scale, bias and codes; an
+// mxfp4 tensor's block_mxfp4, its exponent and its codes with element j in
+// the low nibble of byte j % 16 when j < 16, else in its high nibble (MLX
+// packs element j at bits 4 j of the row); an nvfp4 tensor's 16 E4M3 scales,
+// its row's tensor scale and its codes as stored; an fp8 tensor's row's tensor
+// scale and its E4M3 values (metal/abi/QuantFormat.h).
+void readSafetensorsRows(const gguf::TensorRows &rows, uint64_t start, uint64_t count, uint64_t column, uint64_t span,
                  uint8_t *to) {
-  const QuantFormat &format = mlxFormat(rows);
-  const bool affine = rows.mlx.biases;
-  const uint64_t block = format.block_bytes, scaleBytes = affine ? 2 : 1, codes = block - (affine ? 4 : 1),
-                 groups = rows.rowBytes / block;
-  if (column % block || span % block) throw GgufError("MLX quantized rows are read by whole groups: " + rows.name);
+  const QuantFormat &format = nativeFormat(rows);
+  const uint32_t id = gguf_format_of(rows.type);
+  const bool affine = quant_affine_format(id);
+  // Bytes of a native block from the scales tensor (its biases take as many
+  // as its scales) and from the codes tensor.
+  const uint64_t block = format.block_bytes, groups = rows.rowBytes / block;
+  const uint64_t scaleBytes = affine ? 2 : id == GGUF_FMT_NVFP4 ? QUANT_NVFP4_G : id == GGUF_FMT_FP8 ? 0 : 1;
+  const uint64_t codes =
+      block - (affine ? 4 : id == GGUF_FMT_NVFP4 ? QUANT_NVFP4_CODES : id == GGUF_FMT_FP8 ? QUANT_FP8_VALUES : 1);
+  if (column % block || span % block)
+    throw GgufError("quantized safetensors rows are read by whole blocks: " + rows.name);
   // One read of each tensor per run of rows when they are read whole, else per row.
-  const uint64_t perRead = span == rows.rowBytes ? count : 1, spanGroups = span / block;
-  std::vector<uint8_t> codeBytes(perRead * spanGroups * codes), scales(perRead * spanGroups * scaleBytes),
-      biases(affine ? perRead * spanGroups * 2 : 0);
+  const uint64_t perRead = span == rows.rowBytes ? count : 1, spanBlocks = span / block;
+  std::vector<uint8_t> codeBytes(perRead * spanBlocks * codes), scales(perRead * spanBlocks * scaleBytes),
+      biases(affine ? perRead * spanBlocks * 2 : 0);
+  const std::vector<float> g = tensorScales(rows, start, count);
   for (uint64_t row = 0; row < count; row += perRead) {
     const uint64_t at = (start + row) * groups + column / block;
-    rows.mlx.codes->read(at * codes, codeBytes);
-    rows.mlx.scales->read(at * scaleBytes, scales);
-    if (affine) rows.mlx.biases->read(at * 2, biases);
-    for (uint64_t group = 0; group < perRead * spanGroups; ++group) {
-      uint8_t *out = to + row * span + group * block;
-      const uint8_t *in = codeBytes.data() + group * codes;
+    rows.safetensors.codes->read(at * codes, codeBytes);
+    if (scaleBytes) rows.safetensors.scales->read(at * scaleBytes, scales);
+    if (affine) rows.safetensors.biases->read(at * 2, biases);
+    for (uint64_t b = 0; b < perRead * spanBlocks; ++b) {
+      uint8_t *out = to + row * span + b * block;
+      const uint8_t *in = codeBytes.data() + b * codes;
+      const float scale = g[row + b / spanBlocks];
       if (affine) {
-        std::memcpy(out, scales.data() + 2 * group, 2);
-        std::memcpy(out + 2, biases.data() + 2 * group, 2);
+        std::memcpy(out, scales.data() + 2 * b, 2);
+        std::memcpy(out + 2, biases.data() + 2 * b, 2);
         std::memcpy(out + 4, in, codes);
-        continue;
+      } else if (id == GGUF_FMT_NVFP4) {
+        std::memcpy(out, scales.data() + QUANT_NVFP4_G * b, QUANT_NVFP4_G);
+        std::memcpy(out + QUANT_NVFP4_G, &scale, 4);
+        std::memcpy(out + QUANT_NVFP4_CODES, in, codes);
+      } else if (id == GGUF_FMT_FP8) {
+        std::memcpy(out, &scale, 4);
+        std::memcpy(out + QUANT_FP8_VALUES, in, codes);
+      } else {
+        out[0] = scales[b];
+        for (uint64_t j = 0; j < 16; ++j)
+          out[1 + j] = uint8_t(((in[j / 2] >> (4 * (j % 2))) & 15) | ((in[8 + j / 2] >> (4 * (j % 2))) & 15) << 4);
       }
-      out[0] = scales[group];
-      for (uint64_t j = 0; j < 16; ++j)
-        out[1 + j] = uint8_t(((in[j / 2] >> (4 * (j % 2))) & 15) | ((in[8 + j / 2] >> (4 * (j % 2))) & 15) << 4);
     }
   }
 }
@@ -152,9 +201,50 @@ void quantizeRows(const gguf::TensorRows &rows, uint64_t start, uint64_t count, 
   const uint64_t perRead = span == rows.rowBytes ? count : 1, spanGroups = span / format.block_bytes;
   std::vector<uint8_t> weights(perRead * spanGroups * groupBytes);
   for (uint64_t row = 0; row < count; row += perRead) {
-    rows.mlx.bfloat16->read(((start + row) * groups + column / format.block_bytes) * groupBytes, weights);
+    rows.safetensors.bfloat16->read(((start + row) * groups + column / format.block_bytes) * groupBytes, weights);
     for (uint64_t group = 0; group < perRead * spanGroups; ++group)
       quantizeGroup(weights.data() + group * groupBytes, to + row * span + group * format.block_bytes);
+  }
+}
+
+// Native NVFP4 bytes [column, column + span) of `count` rows of llama.cpp's
+// NVFP4 from source row `start` on, back to back: per 256 elements the 16
+// UE4M3 scales of four block_nvfp4 as the E4M3 scales they are (llama.cpp
+// reads 0x7F as 0 and ignores bit 7), the row's tensor scale, and the codes with
+// element e in the low nibble of byte e / 2 when e is even, else in its high
+// one (metal/abi/QuantFormat.h), where a block_nvfp4 holds element j of each
+// 16 in the low nibble of byte j and element j + 8 in its high one.
+void readGgufNvfp4Rows(const gguf::TensorRows &rows, uint64_t start, uint64_t count, uint64_t column, uint64_t span,
+                       uint8_t *to) {
+  const QuantFormat &format = kQuantFormats[GGUF_FMT_NVFP4];
+  const GgmlTypeTraits &blocks = *ggmlTypeTraits(ggml::kNVFP4);
+  const uint64_t perNative = format.block_elements / blocks.blockElements, nativeBlocks = span / format.block_bytes,
+                 sourceSpan = nativeBlocks * perNative * blocks.blockBytes;
+  // One read per run of rows when they are read whole (contiguous in the file), else per row.
+  const uint64_t perRead = span == rows.rowBytes ? count : 1;
+  std::vector<uint8_t> source(perRead * sourceSpan);
+  const std::vector<float> g = tensorScales(rows, start, count);
+  for (uint64_t row = 0; row < count; row += perRead) {
+    rows.file->readData(rows.offset + (start + row) * rows.ggufNvfp4RowBytes +
+                            column / format.block_bytes * perNative * blocks.blockBytes,
+                        source);
+    for (uint64_t b = 0; b < perRead * nativeBlocks; ++b) {
+      uint8_t *out = to + row * span + b * format.block_bytes;
+      for (uint64_t q = 0; q < perNative; ++q) {
+        const uint8_t *in = source.data() + (b * perNative + q) * blocks.blockBytes;
+        for (uint64_t s = 0; s < 4; ++s) {
+          const uint8_t *codes = in + 4 + 8 * s;
+          out[4 * q + s] = in[s] == 0x7F ? 0 : in[s] & 0x7F;
+          // Elements 2 i and 2 i + 1: the low nibbles of bytes 2 i and 2 i + 1 for i < 4, else their high ones.
+          uint8_t *pairs = out + QUANT_NVFP4_CODES + 32 * q + 8 * s;
+          for (uint64_t i = 0; i < 4; ++i) {
+            pairs[i] = uint8_t((codes[2 * i] & 15) | (codes[2 * i + 1] & 15) << 4);
+            pairs[4 + i] = uint8_t(codes[2 * i] >> 4 | (codes[2 * i + 1] & 0xF0));
+          }
+        }
+      }
+      std::memcpy(out + QUANT_NVFP4_G, &g[row + b / nativeBlocks], 4);
+    }
   }
 }
 
@@ -169,9 +259,13 @@ void readRows(const gguf::TensorRows &rows, uint64_t first, uint64_t count, uint
     uint64_t run = 1;
     if (span == rows.rowBytes)
       while (row + run < count && sourceRow(rows, first + row + run) == start + run) ++run;
-    if (rows.mlx.codes) readMlxRows(rows, start, run, column, span, to + row * span);
-    else if (rows.mlx.bfloat16) quantizeRows(rows, start, run, column, span, to + row * span);
-    else rows.file->readData(rows.offset + start * rows.rowBytes + column, {to + row * span, run * span});
+    uint8_t *out = to + row * span;
+    switch (rowReader(rows)) {
+    case RowReader::Stored: rows.file->readData(rows.offset + start * rows.rowBytes + column, {out, run * span}); break;
+    case RowReader::Safetensors: readSafetensorsRows(rows, start, run, column, span, out); break;
+    case RowReader::GgufNvfp4: readGgufNvfp4Rows(rows, start, run, column, span, out); break;
+    case RowReader::QuantizedBfloat16: quantizeRows(rows, start, run, column, span, out); break;
+    }
     row += run;
   }
 }
@@ -198,35 +292,14 @@ void widenToFloat32(const uint8_t *values, uint64_t count, uint8_t *to) {
   }
 }
 
-// Writes the F32 values, as the kernels compute them, of `count` native
-// blocks of MLX format `id`: s * code + z (affine), or kFP4Values[code] (twice
-// the E2M1 value) times 2^(e - 128) (mxfp4).
-void dequantize(const uint8_t *blocks, uint64_t count, uint32_t id, uint8_t *to) {
-  const QuantFormat &format = kQuantFormats[id];
-  if (id == GGUF_FMT_MXFP4) {
-    for (uint64_t block = 0; block < count; ++block) {
-      const uint8_t *in = blocks + block * format.block_bytes;
-      const float scale = std::ldexp(1.0f, int{in[0]} - 128);
-      for (uint32_t l = 0; l < format.block_elements; ++l) {
-        const float value = float(kFP4Values[(in[1 + l % 16] >> (l < 16 ? 0 : 4)) & 15]) * scale;
-        std::memcpy(to + 4 * (block * format.block_elements + l), &value, 4);
-      }
-    }
-    return;
-  }
-  const uint32_t bits = quant_affine_bits(id), mask = (1u << bits) - 1;
-  for (uint64_t block = 0; block < count; ++block) {
-    const uint8_t *in = blocks + block * format.block_bytes;
-    uint16_t s, z;
-    std::memcpy(&s, in, 2);
-    std::memcpy(&z, in + 2, 2);
-    for (uint32_t l = 0; l < format.block_elements; ++l) {
-      const uint32_t at = l * bits, shift = at % 8;
-      uint32_t word = in[4 + at / 8];
-      if (shift + bits > 8) word |= uint32_t{in[4 + at / 8 + 1]} << 8;
-      const float value = std::fma(static_cast<float>((word >> shift) & mask), widenBfloat16(s), widenBfloat16(z));
-      std::memcpy(to + 4 * (block * format.block_elements + l), &value, 4);
-    }
+// Writes the F32 1 + w of `count` BF16 RMSNorm weights w, which transformers
+// stores 1 below the weights the norm multiplies by.
+void centeredNorm(const uint8_t *values, uint64_t count, uint8_t *to) {
+  for (uint64_t i = 0; i < count; ++i) {
+    uint16_t weight;
+    std::memcpy(&weight, values + 2 * i, 2);
+    const float value = 1.0F + widenBfloat16(weight);
+    std::memcpy(to + 4 * i, &value, 4);
   }
 }
 
@@ -239,13 +312,13 @@ uint64_t copyBytes(const gguf::Copy &copy) {
 }
 
 // The tasks that write a copy into image, each of whole rows within
-// kLoadStepBytes or, for a wider row, a piece of whole values (whole groups
-// of an MLX affine tensor) of one row: a copy as stored reads in place, a
-// converted one through its thread's staging.
+// kLoadStepBytes or, for a wider row, a piece of whole values (whole native
+// blocks of rows a reader builds) of one row: a copy as stored reads in
+// place, a converted one through its thread's staging.
 void addCopyTasks(uint8_t *image, const gguf::Copy &copy,
                   std::vector<std::function<void(std::vector<uint8_t> &)>> &tasks) {
   const gguf::TensorRows &rows = copy.source;
-  const uint64_t unit = rows.mlx.codes ? mlxFormat(rows).block_bytes : 4;
+  const uint64_t unit = rowReader(rows) == RowReader::Stored ? 4 : nativeFormat(rows).block_bytes;
   const uint64_t span = std::min<uint64_t>(rows.rowBytes, kLoadStepBytes / unit * unit);
   const uint64_t batch = span == rows.rowBytes ? kLoadStepBytes / rows.rowBytes : 1;
   for (uint64_t first = 0; first < rows.rows; first += batch) {
@@ -266,14 +339,13 @@ void addCopyTasks(uint8_t *image, const gguf::Copy &copy,
           narrowToBfloat16(staging.data(), count * width / 4, to, rows.name);
           break;
         case gguf::Conversion::WidenToFloat32: widenToFloat32(staging.data(), count * width / 2, to); break;
+        case gguf::Conversion::CenteredNorm: centeredNorm(staging.data(), count * width / 2, to); break;
         case gguf::Conversion::Decay: {
           const bool bfloat16 = rows.type == ggml::kBF16;
           writeGdnDecay(staging.data(), count * width / (bfloat16 ? 2 : 4), bfloat16, to);
           break;
         }
-        case gguf::Conversion::DequantizeToFloat32:
-          dequantize(staging.data(), count * width / mlxFormat(rows).block_bytes, gguf_format_of(rows.type), to);
-          break;
+        case gguf::Conversion::DequantizeToFloat32: // decoded on the GPU (writeDecoded)
         case gguf::Conversion::None: break;
         }
       });
@@ -397,6 +469,40 @@ void writeRepack(metal::MetalBackend &backend, const metal::MetalBuffer &image, 
   }
 }
 
+// The rows of a DequantizeToFloat32 copy that one run decodes: as many as the
+// staging holds, whose elements the gather's 32-bit index counts (no format
+// holds more than eight in a byte).
+uint64_t decodedRun(const gguf::Copy &copy) {
+  const gguf::TensorRows &rows = copy.source;
+  const uint64_t run = std::min(rows.rows, kGgufRepackStagingBytes / rows.rowBytes);
+  if (!run) throw GgufError("weight row exceeds the repack staging: " + rows.name);
+  return run;
+}
+
+// Writes a DequantizeToFloat32 copy: runs of its native rows staged in input,
+// each gathered on the GPU (kernels/shared/embedding.metal,
+// gguf_embed_f32_<format>) into the F32 values of its format's decode, the run's
+// rows by their ids in `ids` (0, 1, ...).
+void writeDecoded(metal::MetalBackend &backend, const metal::MetalBuffer &image, const gguf::Copy &copy,
+                  const metal::MetalBuffer &input, const metal::MetalBuffer &ids) {
+  const gguf::TensorRows &rows = copy.source;
+  const QuantFormat &format = kQuantFormats[gguf_format_of(rows.type)];
+  if (rows.rowBytes % format.block_bytes) throw GgufError("decoded rows are not whole native blocks: " + rows.name);
+  const uint64_t columns = rows.rowBytes / format.block_bytes * format.block_elements, run = decodedRun(copy);
+  for (uint64_t first = 0; first < rows.rows; first += run) {
+    const uint64_t count = std::min(run, rows.rows - first);
+    readRows(rows, first, count, 0, rows.rowBytes, static_cast<uint8_t *>(input.contents()));
+    const GgufEmbedParams params{static_cast<uint32_t>(count), static_cast<uint32_t>(count),
+                                 static_cast<uint32_t>(columns)};
+    const metal::MetalBuffer output = backend.view(image, copy.destination + first * columns * sizeof(float),
+                                                   count * columns * sizeof(float));
+    static_cast<void>(backend.submit({std::string("gguf_embed_f32_") + format.name,
+                                      {{0, ids}, {1, input}, {2, output}},
+                                      {{3, &params, sizeof(params)}}, {(count * columns + 255) / 256, 1, 1},
+                                      {256, 1, 1}}));
+  }
+}
+
 } // namespace
 
 void writeGgufImage(metal::MetalBackend &backend, const metal::MetalBuffer &image, const gguf::Image &plan) {
@@ -404,14 +510,22 @@ void writeGgufImage(metal::MetalBackend &backend, const metal::MetalBuffer &imag
   if (destination.size() != plan.bytes) throw GgufError("GGUF image size differs from its plan");
   std::vector<std::pair<uint64_t, uint64_t>> extents;
   for (const gguf::Fill &fill : plan.fills) extents.emplace_back(fill.offset, fill.bytes.size());
+  // Copies the CPU converts read whole 4-byte values; the GPU decodes the
+  // others from whole native blocks.
+  std::vector<const gguf::Copy *> decoded;
+  uint64_t staging = 0, ids = 0;
   for (const gguf::Copy &copy : plan.copies) {
+    const bool decodes = copy.conversion == gguf::Conversion::DequantizeToFloat32;
     if (!copy.source.rows || !copy.source.rowBytes ||
-        (copy.conversion != gguf::Conversion::None && copy.source.rowBytes % 4))
+        (copy.conversion != gguf::Conversion::None && !decodes && copy.source.rowBytes % 4))
       throw GgufError("invalid prepared weight copy");
     extents.emplace_back(copy.destination, copyBytes(copy));
+    if (!decodes) continue;
+    decoded.push_back(&copy);
+    staging = std::max(staging, decodedRun(copy) * copy.source.rowBytes);
+    ids = std::max(ids, decodedRun(copy));
   }
   std::vector<RepackChunk> chunks;
-  uint64_t staging = 0;
   for (const gguf::Repack &repack : plan.repacks) {
     requireRepack(repack, plan.bytes);
     const auto offsets = planeOffsets(repack);
@@ -426,15 +540,19 @@ void writeGgufImage(metal::MetalBackend &backend, const metal::MetalBuffer &imag
   // Copies keep their source precision and never pass through a
   // quantization operation.
   std::vector<std::function<void(std::vector<uint8_t> &)>> tasks;
-  for (const gguf::Copy &copy : plan.copies) addCopyTasks(destination.data(), copy, tasks);
+  for (const gguf::Copy &copy : plan.copies)
+    if (copy.conversion != gguf::Conversion::DequantizeToFloat32) addCopyTasks(destination.data(), copy, tasks);
   std::vector<std::vector<uint8_t>> copyStaging(loadThreads());
   parallelFor(tasks.size(), [&](size_t index, unsigned thread) { tasks[index](copyStaging[thread]); });
-  // One staging buffer serves every repack of the image.
-  if (!plan.repacks.empty()) {
-    const auto input = backend.allocateBuffer(staging, metal::BufferStorage::Shared, "load/rows");
-    for (size_t i = 0; i < plan.repacks.size(); ++i)
-      writeRepack(backend, image, plan.repacks[i], chunks[i], input);
-  }
+  // One staging buffer serves every repack and decoded copy of the image.
+  if (plan.repacks.empty() && decoded.empty()) return;
+  const auto input = backend.allocateBuffer(staging, metal::BufferStorage::Shared, "load/rows");
+  for (size_t i = 0; i < plan.repacks.size(); ++i) writeRepack(backend, image, plan.repacks[i], chunks[i], input);
+  if (decoded.empty()) return;
+  const auto rowIds = backend.allocateBuffer(ids * sizeof(uint32_t), metal::BufferStorage::Shared, "load/row-ids");
+  auto *id = static_cast<uint32_t *>(rowIds.contents());
+  for (uint32_t row = 0; row < ids; ++row) id[row] = row;
+  for (const gguf::Copy *copy : decoded) writeDecoded(backend, image, *copy, input, rowIds);
 }
 
 } // namespace splash::model
