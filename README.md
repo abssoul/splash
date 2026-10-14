@@ -5,12 +5,15 @@
 > This is a community port, not an official Inco release.
 >
 > - **M1/M2:** prebuilt releases on [the releases page](https://github.com/paperniuk/splash/releases);
->   source in branch [`apple7-m1-1.3`](https://github.com/paperniuk/splash/tree/apple7-m1-1.3)
->   (upstream 1.3.0 plus the M1/M2 commits).
-> - **On M1/M2 this build runs** the models upstream 1.3 loads (GGUF, including Prism ML's Ternary
->   Bonsai `PQ2_0`, and MLX 4-bit) on its own kernels, the vision encoder included.
-> - **Neural Engine prefill** (new in upstream 1.3) runs on M1/M2 too: the 27B processes long
->   prompts about 1.5x faster on an M1 Max. `--disable-ane` keeps everything on the GPU.
+>   source in branch [`apple7-m1-1.3.2`](https://github.com/paperniuk/splash/tree/apple7-m1-1.3.2)
+>   (upstream 1.3.2 plus the M1/M2 commits).
+> - **On M1/M2 this build runs** the models upstream 1.3.2 loads (GGUF, including Prism ML's Ternary
+>   Bonsai `PQ2_0`, and MLX checkpoints) on its own kernels, the vision encoder included.
+> - **Neural Engine prefill** runs on M1/M2 too: the 27B processes long prompts about 1.5x faster
+>   on an M1 Max. `--disable-ane` keeps everything on the GPU.
+> - **Work in progress:** on 1.3.2 the 27B decodes about 7% slower on an M1 Max than 1.3.0-m1.1
+>   (55 vs 59 tok/s). Part of it is the M1 kernels for the weight format upstream adopted in 1.3.1,
+>   part is upstream's own speculative decoding.
 > - **M3 and newer:** use official Splash, `brew install incoai/tap/splash`.
 > - **M1/M2 problems:** open an issue here, not upstream.
 >
