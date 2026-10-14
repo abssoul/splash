@@ -928,9 +928,8 @@ int main(int argc, char **argv) {
     try {
       MetalBackend backend(argv[1]);
       const Linear linear(backend.capabilities());
-      // Apple7/8 run the staged tiles' dispatches on their MMA kernels and never plan the Apple9 register tile.
-      std::vector<LinearTile> tiles{LinearTile::GgufStaged};
-      if (backend.capabilities().appleGpuFamily >= 9) tiles.insert(tiles.begin(), LinearTile::GgufRegister);
+      // Apple7/8 run the staged tiles' dispatches on their MMA kernels and the register tile's on its F32 instances.
+      const std::vector<LinearTile> tiles{LinearTile::GgufRegister, LinearTile::GgufStaged};
       for (const LinearTile tile : tiles) {
         decodeTile(backend, linear, tile, false);
         fusedDecode(backend, linear, tile, false);

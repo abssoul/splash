@@ -17,6 +17,18 @@
 // Weights: the GGUF image (metal/abi/QuantFormat.h), read by chunk: lane c of
 // a fragment reads chunk c of each group. Activations: the Table16 table and
 // row sums (kernels/common/gguf_sgmatrix.h).
+//
+// Apple7/8 (M1/M2) run the same tile with the operands widened (the F32
+// instances, gguf_decode_sgf_*): they have no bf16 arithmetic and issue the
+// MMA on the ordinary ALU pipes, so the weights enter as exact half (fp32 for
+// bf16 values, which half does not hold) and the activations as exact fp32.
+// Every product stays exact and the chains, coefficients and epilogue are the
+// Apple9 tile's. On an M1 Max this replaces the staged MMA tile
+// (kernels/shared/gguf_linear_mma.metal), whose per-element dequantization
+// into threadgroup memory bounds MLX 4-bit decode. Apple7/8 run a fused
+// projection's segments as dispatches of their own: an F32 instance of the
+// run-time-format fused kernel below, every format inlined, returned wrong
+// values at four lanes under shader validation and then hung an M1 Max's GPU.
 #pragma clang fp reassociate(off)
 #include "metal/abi/Gguf.h"
 #include "metal/kernels/common/gguf_sgmatrix.h"
@@ -27,6 +39,12 @@
 #include "metal/kernels/common/split_reduce.h"
 
 namespace gguf_sg {
+
+// Whether a format's coefficients cover whole 64-input spans: MLX affine in groups of 64 or 128.
+template <class F> struct SpanCoefficients { static constexpr constant bool value = false; };
+template <uint Bits, uint Groups> struct SpanCoefficients<FmtAffine<Bits, Groups>> {
+  static constexpr constant bool value = Groups >= 2;
+};
 
 template <class F> struct Shape {
   enum : uint {
@@ -40,6 +58,9 @@ template <class F> struct Shape {
     // bf16 bits of the operand of code 0: 128, or 160 - zero when seeded
     Operand = 0x4300 + (Seeded ? kZeroPointOffset - 128 - F::Zero : 0),
     CG = Seeded || F::Group == 16 ? 2 : 1,                    // coefficient groups per 32 inputs
+    // One coefficient over each 64-input span (MLX affine in groups of 64 or 128), whose chain the F32 instances
+    // run over the whole span, closing it once
+    SpanChain = SpanCoefficients<F>::value,
     // Spans decoded per coefficient unit: every span of eight groups (one meta unit of eight, or two of four), or
     // half of them where a span's coefficients take twice Q4_K's storage (Q2_K's (s, b) per 16 inputs)
     UnitSpans = F::MetaGroups == 1 ? 1 : CG * (HasMin ? 2 : 1) <= 2 ? 4 : 2,
@@ -60,6 +81,43 @@ constant constexpr uint kCoefFloat2s = kCoefs<FmtQ4K>;
 #define GGUF_SG_COEF_BYTES(F, f) static_assert(kCoefs<F> * sizeof(Coef<F>) <= kCoefFloat2s * sizeof(float2), #f " coefficients fit");
 QUANT_REGISTER_FORMATS(GGUF_SG_COEF_BYTES)
 #undef GGUF_SG_COEF_BYTES
+
+// The type of the weight operand: bf16 on Apple9; on Apple7/8 half, which holds every other format's operands
+// exactly, or fp32 for bf16 values.
+template <class F, bool F32>
+using OperandType = metal::conditional_t<!F32, bfloat, metal::conditional_t<F::Kind == QuantFloat16, float, half>>;
+// The pair table's entries: as the operand, half for fp32 operands (no codebook format has them).
+template <class F, bool F32> using LutPair = vec<metal::conditional_t<F32, half, bfloat>, 2>;
+// The activation operand: the table's bf16, widened to fp32 on Apple7/8.
+template <bool F32> using InputType = metal::conditional_t<F32, float, bfloat>;
+
+// The exact half operand of pair f of a chunk, as operand<F> but for Apple7/8: linear codes or-ed into half 1024
+// (whose ulp is 1) less 1024 minus the bf16 tile's offset, so the chains are that tile's.
+template <class F>
+inline vec<OperandType<F, true>, 2> operand_f32(typename F::Chunk ch, uint f, threadgroup const half2 *lut) {
+  typedef Shape<F> S;
+  if constexpr (F::Kind == QuantLinear) {
+    constexpr uint offset = S::Wide ? 0 : S::Seeded ? kZeroPointOffset - F::Zero : 128;
+    return as_type<half2>(F::codes(ch)[f] | 0x64006400u) - half2(half(1024 - offset));
+  } else if constexpr (F::Kind == QuantCodebook) {
+    return lut[(F::indices(ch) >> (8 * f)) & 0xFFu];
+  } else if constexpr (F::Kind == QuantInt8) {
+    const uint2 v = F::values(ch);
+    return half2(as_type<char2>(ushort((f < 2 ? v.x : v.y) >> (16 * (f & 1)))));
+  } else if constexpr (F::Kind == QuantFloat8) {
+    const uint2 v = F::values(ch);
+    return quant_e4m3_pair(quant_byte_pairs(((f < 2 ? v.x : v.y) >> (16 * (f & 1))) & 0xFFFFu).x);
+  } else if constexpr (F::Kind == QuantFloat16) {
+    static_assert(is_same_v<typename F::Value, bfloat>, "the register tile takes bf16 values only");
+    return float2(as_type<bfloat2>(F::values(ch)[f]));
+  } else {
+    const uint2 g = F::grid(ch);
+    const uchar4 m = as_type<uchar4>(f < 2 ? g.x : g.y);
+    const uint s = F::signs(ch) >> (2 * f);
+    const half2 v = half2(m[2 * (f & 1)], m[2 * (f & 1) + 1]);
+    return select(v, -v, bool2(s & 1u, s & 2u));
+  }
+}
 
 // The exact bf16 operand of pair f of a chunk.
 template <class F>
@@ -130,13 +188,14 @@ template <class F> inline Coef<F> coefficient(CoefSource<F> src, uint u, uint j)
 }
 
 // One threadgroup: 4 simdgroups x GGUF_REGISTER_COLUMNS = GGUF_TILE_COLUMNS columns of one segment,
-// L request lanes of eight rows, one K partition (tg.y) of `splits`, into a destination of type Out.
-template <class F, uint L, GgufEpilogue Ep, class Out>
+// L request lanes of eight rows, one K partition (tg.y) of `splits`, into a destination of type Out; F32 widens the
+// operands for Apple7/8.
+template <class F, uint L, GgufEpilogue Ep, bool F32, class Out>
 inline void decode(device const bfloat *table, device const float *sums, device uchar *w0,
                    device uchar *w1, device uchar *meta, device Out *out,
                    device coherent(device) float *partials, device atomic_uint *counters,
                    device const bfloat *aux, const GgufDecodeParams p, uint2 tg, uint tid, uint sg,
-                   uint lane, threadgroup const bfloat2 *lut, threadgroup Coef<F> *coefs,
+                   uint lane, threadgroup const LutPair<F, F32> *lut, threadgroup Coef<F> *coefs,
                    threadgroup uint *arrival) {
   typedef Shape<F> S;
   typedef Coef<F> C;
@@ -207,20 +266,62 @@ inline void decode(device const bfloat *table, device const float *sums, device 
         p1[nf] += 2 * QUANT_TILE_ROWS * F::P1;
       }
       if (more) load(nxt);
+      if constexpr (F32 && S::SpanChain) {
+        float2 dot[L][2];
+#pragma unroll
+        for (uint r = 0; r < L; ++r) dot[r][0] = dot[r][1] = float2(0);
+#pragma unroll
+        for (uint q = 0; q < 2; ++q) {
+          vec<OperandType<F, F32>, 2> a[2][4];
+#pragma unroll
+          for (uint nf = 0; nf < 2; ++nf)
+#pragma unroll
+            for (uint f = 0; f < 4; ++f) a[nf][f] = operand_f32<F>(cur[nf][q], f, lut);
+#pragma unroll
+          for (uint r = 0; r < L; ++r) {
+            const vec<bfloat, 8> bq = xt[ulong(r) * K + (8 * q + fm) * 4 + c];
+#pragma unroll
+            for (uint f = 0; f < 4; ++f) {
+              const float2 b = float2(reinterpret_cast<thread const bfloat2 *>(&bq)[f]);
+#pragma unroll
+              for (uint nf = 0; nf < 2; ++nf) sgmatrix::mma_mixed(dot[r][nf], a[nf][f], b);
+            }
+          }
+        }
+        C cs[2];
+#pragma unroll
+        for (uint nf = 0; nf < 2; ++nf) cs[nf] = cu[us * 2 * NC + nf * 8 + fm];
+#pragma unroll
+        for (uint r = 0; r < L; ++r) {
+          device const float *rs = s32 + ulong(r) * tileSums + fn;
+          const float2 sum = *(device const float2 *)rs + *(device const float2 *)(rs + 8);
+#pragma unroll
+          for (uint nf = 0; nf < 2; ++nf) {
+            acc[r][nf] = fma(dot[r][nf], cs[nf].x, acc[r][nf]);
+            acc[r][nf] = fma(sum, cs[nf].y, acc[r][nf]);
+          }
+        }
+      } else
 #pragma unroll
       for (uint q = 0; q < 2; ++q) {
-        bfloat2 a[2][4];
+        vec<OperandType<F, F32>, 2> a[2][4];
         C cs[S::CG][2];
 #pragma unroll
         for (uint nf = 0; nf < 2; ++nf) {
 #pragma unroll
-          for (uint f = 0; f < 4; ++f) a[nf][f] = operand<F>(cur[nf][q], f, lut);
+          for (uint f = 0; f < 4; ++f) {
+            if constexpr (F32) a[nf][f] = operand_f32<F>(cur[nf][q], f, lut);
+            else a[nf][f] = operand<F>(cur[nf][q], f, lut);
+          }
 #pragma unroll
           for (uint h = 0; h < S::CG; ++h) cs[h][nf] = cu[((us * 2 + q) * S::CG + h) * NC + nf * 8 + fm];
         }
 #pragma unroll
         for (uint r = 0; r < L; ++r) {
           const vec<bfloat, 8> bq = xt[ulong(r) * K + (8 * q + fm) * 4 + c];
+          vec<InputType<F32>, 2> b[4];
+#pragma unroll
+          for (uint f = 0; f < 4; ++f) b[f] = vec<InputType<F32>, 2>(reinterpret_cast<thread const bfloat2 *>(&bq)[f]);
           float2 sum = float2(0), seed[S::CG];
           if (S::HasMin && !S::Seeded) sum = *(device const float2 *)(s32 + ulong(r) * tileSums + q * 8 + fn);
 #pragma unroll
@@ -234,7 +335,7 @@ inline void decode(device const bfloat *table, device const float *sums, device 
               float2 dot = seed[h];
 #pragma unroll
               for (uint f = h * FG; f < (h + 1) * FG; ++f)
-                sgmatrix::mma_acc<bfloat>(dot, a[nf][f], reinterpret_cast<thread const bfloat2 *>(&bq)[f]);
+                sgmatrix::mma_mixed(dot, a[nf][f], b[f]);
               if constexpr (S::HasMin) {
                 acc[r][nf] = fma(dot, cs[h][nf].x, acc[r][nf]);
                 acc[r][nf] = fma(S::Seeded ? seed[h] : sum, cs[h][nf].y, acc[r][nf]);
@@ -309,7 +410,7 @@ kernel void decode_linear_gguf_prepare(device const bfloat *input [[buffer(0)]],
                      span, row, lane, input[row * width + k], input[row * width + k + 1]);
 }
 
-#define GGUF_SG_KERNEL(Name, F, L, EP, Out)                                                                   \
+#define GGUF_SG_KERNEL(Name, F, L, EP, F32, Out)                                                              \
   kernel void Name(device const bfloat *table [[buffer(0)]], device const float *sums [[buffer(1)]],       \
                    device uchar *w0 [[buffer(2)]], device uchar *w1 [[buffer(3)]],                          \
                    device uchar *meta [[buffer(4)]], device Out *out [[buffer(5)]],                         \
@@ -318,23 +419,27 @@ kernel void decode_linear_gguf_prepare(device const bfloat *input [[buffer(0)]],
                    constant GgufDecodeParams &p [[buffer(9)]], uint2 tg [[threadgroup_position_in_grid]],       \
                    uint tid [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],    \
                    uint lane [[thread_index_in_simdgroup]]) {                                               \
-    threadgroup bfloat2 lut[F::Kind == QuantCodebook ? kQuantPairTableEntries : 1];                         \
+    threadgroup gguf_sg::LutPair<F, F32> lut[F::Kind == QuantCodebook ? kQuantPairTableEntries : 1];        \
     threadgroup gguf_sg::Coef<F> coefs[gguf_sg::kCoefs<F>];                                                 \
     threadgroup uint arrival;                                                                               \
-    quant_pair_table<F>(lut, tid, GGUF_REGISTER_THREADS);                                                                              \
-    gguf_sg::decode<F, L, EP>(table, sums, w0, w1, meta, out, partials, counters, aux, p, tg, tid, sg, lane, \
-                              lut, coefs, &arrival);                                                        \
+    quant_pair_table<F>(lut, tid, GGUF_REGISTER_THREADS);                                                   \
+    gguf_sg::decode<F, L, EP, F32>(table, sums, w0, w1, meta, out, partials, counters, aux, p, tg, tid, sg, \
+                                   lane, lut, coefs, &arrival);                                             \
   }
-// Each epilogue into bf16, and the plain one also into fp32 (_a_f32: the logits, ops::Projection::destination).
-#define GGUF_SG_EPILOGUES(F, f, L)                                                                            \
-  GGUF_SG_KERNEL(gguf_decode_sg_##f##_l##L##_a, F, L, EpNone, bfloat)                                \
-  GGUF_SG_KERNEL(gguf_decode_sg_##f##_l##L##_a_f32, F, L, EpNone, float)                             \
-  GGUF_SG_KERNEL(gguf_decode_sg_##f##_l##L##_r, F, L, EpResidual, bfloat)                            \
-  GGUF_SG_KERNEL(gguf_decode_sg_##f##_l##L##_g, F, L, EpUpWithGate, bfloat)
-#define GGUF_SG_FORMAT(F, f) \
-  GGUF_SG_EPILOGUES(F, f, 1) GGUF_SG_EPILOGUES(F, f, 2) GGUF_SG_EPILOGUES(F, f, 3) GGUF_SG_EPILOGUES(F, f, 4)
+// Each epilogue into bf16, and the plain one also into fp32 (_a_f32: the logits, ops::Projection::destination);
+// gguf_decode_sg_* for Apple9, gguf_decode_sgf_* (F32) for Apple7/8.
+#define GGUF_SG_EPILOGUES(F, f, L, sg, F32)                                                                   \
+  GGUF_SG_KERNEL(gguf_decode_##sg##_##f##_l##L##_a, F, L, EpNone, F32, bfloat)                                \
+  GGUF_SG_KERNEL(gguf_decode_##sg##_##f##_l##L##_a_f32, F, L, EpNone, F32, float)                             \
+  GGUF_SG_KERNEL(gguf_decode_##sg##_##f##_l##L##_r, F, L, EpResidual, F32, bfloat)                            \
+  GGUF_SG_KERNEL(gguf_decode_##sg##_##f##_l##L##_g, F, L, EpUpWithGate, F32, bfloat)
+#define GGUF_SG_LANES(F, f, sg, F32)                                                                          \
+  GGUF_SG_EPILOGUES(F, f, 1, sg, F32) GGUF_SG_EPILOGUES(F, f, 2, sg, F32) GGUF_SG_EPILOGUES(F, f, 3, sg, F32) \
+  GGUF_SG_EPILOGUES(F, f, 4, sg, F32)
+#define GGUF_SG_FORMAT(F, f) GGUF_SG_LANES(F, f, sg, false) GGUF_SG_LANES(F, f, sgf, true)
 QUANT_REGISTER_FORMATS(GGUF_SG_FORMAT)
 #undef GGUF_SG_FORMAT
+#undef GGUF_SG_LANES
 #undef GGUF_SG_EPILOGUES
 #undef GGUF_SG_KERNEL
 
@@ -360,7 +465,7 @@ inline void gguf_sg_fused(device const bfloat *table, device const float *sums, 
   quant_register_format_switch(p.fmt[s], [&](auto format) {
     typedef decltype(format) F;
     quant_pair_table<F>(lut, tid, GGUF_REGISTER_THREADS);
-    gguf_sg::decode<F, L, EpNone>(table, sums, w0, w1, meta, out, partials, counters, out, q, local,
+    gguf_sg::decode<F, L, EpNone, false>(table, sums, w0, w1, meta, out, partials, counters, out, q, local,
                                               tid, sg, lane, lut,
                                               reinterpret_cast<threadgroup gguf_sg::Coef<F> *>(coefs), &arrival);
   });
@@ -405,7 +510,7 @@ inline void gguf_sg_expert(device const bfloat *table, device const float *sums,
   quant_register_format_switch(s.format, [&](auto format) {
     typedef decltype(format) F;
     quant_pair_table<F>(lut, tid, GGUF_REGISTER_THREADS);
-    gguf_sg::decode<F, 1, Ep>(
+    gguf_sg::decode<F, 1, Ep, false>(
         table + rows * K, sums + tg.y * table16_sums_per_tile(K), s.w0, s.w1, s.meta, out + rows * N, nullptr, nullptr,
         aux + rows * N, q, uint2(tg.x, 0), tid, sg, lane, lut, reinterpret_cast<threadgroup gguf_sg::Coef<F> *>(coefs),
         arrival);

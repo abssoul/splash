@@ -60,8 +60,8 @@ enum class LinearEpilogue : uint8_t { None, Residual, GateUp, UpWithGate };
 // prefill chunks of up to 32 rows), each simdgroup staging its own columns,
 // with optional K splits. GgufPrefill: the 128-row shared-stage prefill tile.
 // GgufRegister: the exact register tile on bf16 8x8 matrix operations
-// (Apple9), over an activation table, every request lane in one threadgroup,
-// optional K splits.
+// (Apple9; Apple7/8 on half weights and fp32 activations), over an activation
+// table, every request lane in one threadgroup, optional K splits.
 enum class LinearTile : uint8_t { GgufStaged, GgufPrefill, GgufRegister };
 // The decode tiles hold at most a full decode batch; prefill chunks of up to
 // this many rows run the staged tile (Linear::ggufBaseline).

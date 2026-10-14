@@ -150,6 +150,16 @@ bool apple9Stages(LinearWorkload w, std::span<const Projection *const> projectio
   return quantized && faster && stagedTileRows(w.rows) == w.rows;
 }
 
+// Whether every quantized segment of the projections is in a format of the
+// register tile (an empty span, a plan from shapes alone, takes it).
+bool registerTakes(std::span<const Projection *const> projections) {
+  for (const Projection *p : projections)
+    if (p)
+      for (const QuantizedSegment &s : p->blocks().segments)
+        if (!s.isFloat() && !quant_register_format(s.formatId)) return false;
+  return true;
+}
+
 // The projection is the plan's matrix, and each of its segments (which tile
 // its leading columns) fills whole column tiles of its kernels: 64 columns
 // for a quantized segment, whose planes hold its tiles, 8 for a float one
@@ -306,6 +316,10 @@ LinearConfig Linear::ggufBaseline(LinearWorkload w, std::span<const Projection *
   // kernel beats staging but for the projections apple9Stages names.
   if (family_ == GpuFamilyClass::Apple9 && registerFormats && !apple9Stages(w, projections))
     return registerDecode(n, k, gpuCores_);
+  // Apple7/8 run its F32 instances wherever every format takes it: the MMA
+  // tile's per-element dequantization through threadgroup memory bounds MLX
+  // 4-bit decode there.
+  if (mmaTiles(family_) && registerFormats && registerTakes(projections)) return registerDecode(n, k, gpuCores_);
   // Decode tiles walking K in lockstep all fetch the same slice of the input
   // at each step, just written by the operator before and in no cache yet,
   // and the fetch sits on every tile's critical path; starting each column
@@ -336,7 +350,8 @@ LinearConfig Linear::ggufBaseline(LinearWorkload w, std::span<const Projection *
 LinearScratchSize Linear::ggufDecodeScratchSize(LinearWorkload w) const {
   const auto [n, k] = w.matrix;
   LinearScratchSize size = LinearPlan(w, ggufBaseline(w)).scratchSize();
-  if (family_ == GpuFamilyClass::Apple9) size.include(LinearPlan(w, stagedDecode(n, k, gpuCores_, family_)).scratchSize());
+  if (family_ == GpuFamilyClass::Apple9 || mmaTiles(family_))
+    size.include(LinearPlan(w, stagedDecode(n, k, gpuCores_, family_)).scratchSize());
   if (w.epilogue == LinearEpilogue::GateUp && spreadsStagedDecode(family_, gpuCores_))
     size.include(LinearPlan(w, oneGateUpPassDecode(n, k, gpuCores_, family_)).scratchSize());
   return size;
@@ -532,8 +547,23 @@ void Linear::addGgufRegister(metal::CommandGraph &graph, const LinearBuffers &b,
               {k / 32, lanes, 1}, {128, 1, 1});
   const metal::DispatchSize grid{segmentColumns(p) / GGUF_TILE_COLUMNS, config.splits, 1};
   const std::string suffix = "_l" + std::to_string(lanes);
+  const std::string prefix = mmaTiles(family_) ? "gguf_decode_sgf_" : "gguf_decode_sg_";
   const auto [partials, counters] = splitScratch(b, config.splits);
+  const auto tensor = [&](const QuantizedSegment &s, char epilogue, const metal::MetalBuffer &output,
+                          const metal::MetalBuffer &aux) {
+    graph.add(kernelInstance(prefix + s.name() + suffix + "_" + epilogue, plan.destination()),
+              {b.scratch.input, b.scratch.sums, s.plane0, s.plane1Slot(), s.meta, output, partials, counters, aux},
+              GgufDecodeParams{k, config.splits, n, s.columnOffset, 0},
+              {s.outputSize / GGUF_TILE_COLUMNS, config.splits, 1}, {GGUF_REGISTER_THREADS, 1, 1});
+  };
   if (segments.size() > 1) {
+    // Apple7/8 run each segment as a dispatch of its own
+    // (kernels/decode/linear_gguf_sgmatrix.metal), their counters and partials
+    // apart by column.
+    if (mmaTiles(family_)) {
+      for (const QuantizedSegment &s : segments) tensor(s, 'a', b.output, b.output);
+      return;
+    }
     std::vector<const QuantizedSegment *> order;
     for (const QuantizedSegment &s : segments) order.push_back(&s);
     std::vector<metal::MetalBuffer> bindings{b.scratch.input, b.scratch.sums};
@@ -542,12 +572,6 @@ void Linear::addGgufRegister(metal::CommandGraph &graph, const LinearBuffers &b,
     graph.add("gguf_decode_sg_fused" + suffix, std::move(bindings), params, grid, {GGUF_REGISTER_THREADS, 1, 1});
     return;
   }
-  const auto tensor = [&](const QuantizedSegment &s, char epilogue, const metal::MetalBuffer &output,
-                          const metal::MetalBuffer &aux) {
-    graph.add(kernelInstance(std::string("gguf_decode_sg_") + s.name() + suffix + "_" + epilogue, plan.destination()),
-              {b.scratch.input, b.scratch.sums, s.plane0, s.plane1Slot(), s.meta, output, partials, counters, aux},
-              GgufDecodeParams{k, config.splits, n, s.columnOffset, 0}, grid, {GGUF_REGISTER_THREADS, 1, 1});
-  };
   addDecodeTensor(b, w.epilogue, segments.front(), gate, tensor);
 }
 
