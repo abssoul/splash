@@ -279,7 +279,7 @@ LinearScratchSize LinearPlan::scratchSize() const noexcept {
   // lane.
   if (config_.tile == LinearTile::GgufRegister) {
     const uint64_t rows = workload_.rows;
-    return {tableBytes(k, rows), tableSumsBytes(LinearInput::Table16, k, rows),
+    return {tableBytes(k, rows, input()), tableSumsBytes(input(), k, rows),
             config_.splits > 1 ? config_.splits * rows * n * sizeof(float) : 0,
             config_.splits > 1 ? uint64_t{n / GGUF_TILE_COLUMNS} * sizeof(uint32_t) : 0};
   }
@@ -319,7 +319,11 @@ LinearConfig Linear::ggufBaseline(LinearWorkload w, std::span<const Projection *
   // Apple7/8 run its F32 instances wherever every format takes it: the MMA
   // tile's per-element dequantization through threadgroup memory bounds MLX
   // 4-bit decode there.
-  if (mmaTiles(family_) && registerFormats && registerTakes(projections)) return registerDecode(n, k, gpuCores_);
+  if (mmaTiles(family_) && registerFormats && registerTakes(projections)) {
+    LinearConfig config = registerDecode(n, k, gpuCores_);
+    config.fp32Table = true;
+    return config;
+  }
   // Decode tiles walking K in lockstep all fetch the same slice of the input
   // at each step, just written by the operator before and in no cache yet,
   // and the fetch sits on every tile's critical path; starting each column
@@ -542,9 +546,12 @@ void Linear::addGgufRegister(metal::CommandGraph &graph, const LinearBuffers &b,
       for (const QuantizedSegment &s : q->blocks().segments)
         if (!quant_register_format(s.formatId))
           throw std::invalid_argument(std::string("the register tile does not take ") + s.name() + " weights");
-  if (b.prepared.layout != LinearInput::Table16 || !b.prepared.source.sameView(b.input))
-    graph.add("decode_linear_gguf_prepare", {b.input, b.scratch.input, b.scratch.sums}, k,
-              {k / 32, lanes, 1}, {128, 1, 1});
+  // Apple7/8's F32 instances read fp32 tables, the others bf16.
+  if ((plan.input() == LinearInput::Table16F) != mmaTiles(family_))
+    throw std::invalid_argument("the register tile's table type does not match the GPU family");
+  if (b.prepared.layout != plan.input() || !b.prepared.source.sameView(b.input))
+    graph.add(plan.input() == LinearInput::Table16F ? "decode_linear_gguf_prepare_f" : "decode_linear_gguf_prepare",
+              {b.input, b.scratch.input, b.scratch.sums}, k, {k / 32, lanes, 1}, {128, 1, 1});
   const metal::DispatchSize grid{segmentColumns(p) / GGUF_TILE_COLUMNS, config.splits, 1};
   const std::string suffix = "_l" + std::to_string(lanes);
   const std::string prefix = mmaTiles(family_) ? "gguf_decode_sgf_" : "gguf_decode_sg_";

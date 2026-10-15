@@ -346,7 +346,7 @@ inline void gdn_decode_batch_phase(
     constant GDNDecodeBatchParams &params,
     uint2 group, uint lane, uint simd_group,
     threadgroup GdnDecodeShared<HeadDim> &shared,
-    device bfloat *table, device float *sums) {
+    device typename Table::Elem *table, device float *sums) {
   constexpr uint Rows = SPLASH_TARGET_VERIFY_ROWS;
   constexpr uint ValueWidth = ValueHeads * HeadDim;
   uint batch = group.y;
@@ -431,7 +431,7 @@ inline void gdn_decode_batch_phase(
 // The out-projection's table (Layout: gguf_sg::Table16).
 #define GDN_DECODE_TABLE_KERNEL(Name, KeyHeads, ValueHeads, HeadDim, ConvDim, PackedWidth, Layout, W, State) \
   kernel void Name(GDN_DECODE_BUFFERS(W), \
-      device bfloat *table [[buffer(15)]], device float *sums [[buffer(16)]], \
+      device Layout::Elem *table [[buffer(15)]], device float *sums [[buffer(16)]], \
       constant GDNDecodeBatchParams &params [[buffer(17)]], GDN_DECODE_THREADS) { \
     GDN_DECODE_BODY(KeyHeads, ValueHeads, HeadDim, ConvDim, PackedWidth, table, sums, Layout, W, State) \
   }
@@ -453,6 +453,11 @@ GDN_DECODE_ENTRY(verify_gdn_fused_f32, 16, 48, 128, 10240, 16640, float)
 GDN_DECODE_ENTRY(verify_gdn_fused_vh32_f32, 16, 32, 128, 8192, 12544, float)
 GDN_DECODE_TABLE_ENTRY(verify_gdn_fused_table16_f32, 16, 48, 128, 10240, 16640, gguf_sg::Table16, float)
 GDN_DECODE_TABLE_ENTRY(verify_gdn_fused_table16_vh32_f32, 16, 32, 128, 8192, 12544, gguf_sg::Table16, float)
+// Table16F: the fp32 table of Apple7/8's register tile.
+GDN_DECODE_TABLE_ENTRY(verify_gdn_fused_table16f, 16, 48, 128, 10240, 16640, gguf_sg::Table16F, bfloat)
+GDN_DECODE_TABLE_ENTRY(verify_gdn_fused_table16f_vh32, 16, 32, 128, 8192, 12544, gguf_sg::Table16F, bfloat)
+GDN_DECODE_TABLE_ENTRY(verify_gdn_fused_table16f_f32, 16, 48, 128, 10240, 16640, gguf_sg::Table16F, float)
+GDN_DECODE_TABLE_ENTRY(verify_gdn_fused_table16f_vh32_f32, 16, 32, 128, 8192, 12544, gguf_sg::Table16F, float)
 #undef GDN_DECODE_ENTRY
 #undef GDN_DECODE_TABLE_ENTRY
 #undef GDN_DECODE_KERNEL

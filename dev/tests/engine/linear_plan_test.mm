@@ -502,6 +502,8 @@ void ggufCoreLaws() {
                           s >= 1 && s <= 8 && (s & (s - 1)) == 0 &&
                           c.spread == (staged && family >= 10 && plannedGpuCores(simulatedDevice(family, cores)) >= 16),
                       "GGUF decode plan tile, split count or walk");
+              require(staged || (one.input() == LinearInput::Table16F) == (family <= 8),
+                      "GGUF register table: fp32 on Apple7/8, bf16 on Apple9");
               require(s == 1 || (staged ? k / s >= 512 && (k / 32) % s == 0 : k / 256 / s >= 1),
                       "GGUF decode partition below the kernel floor");
               require(one.storageRows() == 8 && plan(linear, n, 24).storageRows() == (staged ? 32U : 24U),

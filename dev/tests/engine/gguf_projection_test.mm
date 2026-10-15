@@ -413,8 +413,12 @@ bool sameRows(const std::vector<uint16_t> &a, uint64_t aRow, const std::vector<u
 
 // The configuration of `tile` for a decode workload, or of the staged tile for a prefill chunk of up to 32 rows; the
 // staged tile walks K spread or in lockstep.
+// Apple7/8's register tile reads an fp32 table (LinearConfig::fp32Table); main sets it from the device.
+bool fp32RegisterTable = false;
 LinearConfig config(LinearTile tile, const LinearWorkload &w, uint32_t splits, bool spread = false) {
-  return {.tile = w.phase == LinearPhase::Prefill ? LinearTile::GgufStaged : tile, .splits = splits, .spread = spread};
+  const LinearTile t = w.phase == LinearPhase::Prefill ? LinearTile::GgufStaged : tile;
+  return {.tile = t, .splits = splits, .spread = spread,
+          .fp32Table = fp32RegisterTable && t == LinearTile::GgufRegister};
 }
 // The formats whose weights `tile` takes, in id order: the register tile takes those of quant_register_format.
 std::vector<Fmt> tileFormats(LinearTile tile) {
@@ -928,6 +932,7 @@ int main(int argc, char **argv) {
     try {
       MetalBackend backend(argv[1]);
       const Linear linear(backend.capabilities());
+      fp32RegisterTable = backend.capabilities().appleGpuFamily < 9;
       // Apple7/8 run the staged tiles' dispatches on their MMA kernels and the register tile's on its F32 instances.
       const std::vector<LinearTile> tiles{LinearTile::GgufRegister, LinearTile::GgufStaged};
       for (const LinearTile tile : tiles) {

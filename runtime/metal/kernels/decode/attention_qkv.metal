@@ -97,7 +97,7 @@ VERIFY_ATTENTION_GATE(verify_attention_gate_kv2_g8, 16, 2)
       device const bfloat *packed [[buffer(0)]], \
       device const bfloat *attention [[buffer(1)]], \
       device bfloat *hidden [[buffer(2)]], \
-      device bfloat *table [[buffer(3)]], device float *sums [[buffer(4)]], \
+      device Layout::Elem *table [[buffer(3)]], device float *sums [[buffer(4)]], \
       uint index [[thread_position_in_grid]], \
       uint lane [[thread_index_in_simdgroup]]) { \
     constexpr uint width = QHeads * 256; \
@@ -111,4 +111,6 @@ VERIFY_ATTENTION_GATE(verify_attention_gate_kv2_g8, 16, 2)
   }
 ATTENTION_GATE_TABLE(verify_attention_gate_table16, 24, 4, gguf_sg::Table16)
 ATTENTION_GATE_TABLE(verify_attention_gate_table16_kv2_g8, 16, 2, gguf_sg::Table16)
+ATTENTION_GATE_TABLE(verify_attention_gate_table16f, 24, 4, gguf_sg::Table16F)
+ATTENTION_GATE_TABLE(verify_attention_gate_table16f_kv2_g8, 16, 2, gguf_sg::Table16F)
 #undef ATTENTION_GATE_TABLE

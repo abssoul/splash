@@ -154,7 +154,7 @@ NORM_RMS_STAGED(norm_rms_staged_f32, packed_float4)
 // weights) alongside the reduction's columns.
 template <class Table, class W>
 inline void norm_rms_table(device const bfloat *input, device const W *weight,
-                           device bfloat *output, device bfloat *table, device float *sums,
+                           device bfloat *output, device typename Table::Elem *table, device float *sums,
                            uint width, uint row, uint tid, uint lane, uint sg,
                            threadgroup float *reductions) {
 #pragma clang fp reassociate(off)
@@ -208,7 +208,7 @@ inline void norm_rms_table(device const bfloat *input, device const W *weight,
 #define NORM_RMS_TABLE(Name, Table, W) \
   kernel void Name(device const bfloat *input [[buffer(0)]], \
       device const W *weight [[buffer(1)]], device bfloat *output [[buffer(2)]], \
-      device bfloat *table [[buffer(3)]], device float *sums [[buffer(4)]], \
+      device Table::Elem *table [[buffer(3)]], device float *sums [[buffer(4)]], \
       constant uint &width [[buffer(5)]], uint row [[threadgroup_position_in_grid]], \
       uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], \
       uint sg [[simdgroup_index_in_threadgroup]]) { \
@@ -219,4 +219,6 @@ inline void norm_rms_table(device const bfloat *input, device const W *weight,
 // draft's bf16 norms.
 NORM_RMS_TABLE(norm_rms_table16_decode, gguf_sg::Table16, bfloat)
 NORM_RMS_TABLE(norm_rms_table16_decode_f32, gguf_sg::Table16, float)
+NORM_RMS_TABLE(norm_rms_table16f_decode, gguf_sg::Table16F, bfloat)
+NORM_RMS_TABLE(norm_rms_table16f_decode_f32, gguf_sg::Table16F, float)
 #undef NORM_RMS_TABLE
