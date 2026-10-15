@@ -402,6 +402,13 @@ inline void gdn_decode_batch_phase(
 }
 
 // W: the norm weights' stored type (float: a GGUF's F32 norms, _f32).
+// State rows a simdgroup advances at a time. Two overlap reductions and arithmetic without the register cost of
+// four, but Apple7/8 (Table16F), whose 48 heads leave a core about twelve simdgroups, run four: 10-12% less time at
+// one to four lanes on an M1 Max (eight: 5-7%).
+template <class Layout> constexpr uint gdn_rows_in_flight() {
+  return metal::is_same_v<Layout, gguf_sg::Table16F> ? 4 : 2;
+}
+
 #define GDN_DECODE_BUFFERS(W) \
     device const bfloat *packed [[buffer(0)]], \
     device const bfloat *conv_weights [[buffer(1)]], \
@@ -417,7 +424,8 @@ inline void gdn_decode_batch_phase(
     uint lane [[thread_index_in_simdgroup]], uint simd_group [[simdgroup_index_in_threadgroup]]
 #define GDN_DECODE_BODY(KeyHeads, ValueHeads, HeadDim, ConvDim, PackedWidth, table, sums, Layout, W, State) \
     threadgroup GdnDecodeShared<HeadDim> shared; \
-    gdn_decode_batch_phase<KeyHeads, ValueHeads, HeadDim, ConvDim, PackedWidth, 2, Layout, W, State>( \
+    gdn_decode_batch_phase<KeyHeads, ValueHeads, HeadDim, ConvDim, PackedWidth, \
+                           gdn_rows_in_flight<Layout>(), Layout, W, State>( \
         packed, conv_weights, current0, current1, current2, current3, next0, \
         next1, next2, next3, tape, a_scale, dt_bias, \
         gdn_norm_weight, gdn_hidden, params, group, lane, simd_group, shared, \
@@ -443,7 +451,6 @@ inline void gdn_decode_batch_phase(
   GDN_DECODE_TABLE_KERNEL(Name, KeyHeads, ValueHeads, HeadDim, ConvDim, PackedWidth, Layout, W, float) \
   GDN_DECODE_TABLE_KERNEL(Name##_bf16_state, KeyHeads, ValueHeads, HeadDim, ConvDim, PackedWidth, Layout, W, bfloat)
 
-// Two rows overlap reductions and arithmetic without the register cost of four.
 GDN_DECODE_ENTRY(verify_gdn_fused, 16, 48, 128, 10240, 16640, bfloat)
 GDN_DECODE_ENTRY(verify_gdn_fused_vh32, 16, 32, 128, 8192, 12544, bfloat)
 // Table16 feeds the register tile, after norms that are F32 (a GGUF's) or bf16 (an MLX target's).

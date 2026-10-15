@@ -629,7 +629,7 @@ struct PreparedTables final {
   PreparedTables(MetalBackend &backend, LinearInput tableLayout, uint32_t hiddenWidth,
                  uint32_t laneCount)
       : layout(tableLayout), width(hiddenWidth), lanes(laneCount),
-        tableSize(tableBytes(width, lanes * kRows)),
+        tableSize(tableBytes(width, lanes * kRows, layout)),
         sumsSize(tableSumsBytes(layout, width, lanes * kRows)),
         table(sharedBuffer(backend, tableSize)), sums(sharedBuffer(backend, sumsSize)),
         referenceTable(sharedBuffer(backend, tableSize)),
@@ -654,7 +654,7 @@ struct PreparedTables final {
 std::string caseName(const char *test, const GdnShape &shape, uint32_t lanes, LinearInput layout) {
   return std::string(test) + " vh" + std::to_string(shape.valueHeads) + " lanes " +
          std::to_string(lanes) +
-         (layout == LinearInput::Plain ? " plain" : " Table16");
+         (layout == LinearInput::Plain ? " plain" : layout == LinearInput::Table16F ? " Table16F" : " Table16");
 }
 
 // A lane's result depends on its retained prefix, not its position in a
@@ -1246,14 +1246,15 @@ int main(int argc, char **argv) {
     for (const GdnShape &shape : kShapes)
       for (const uint32_t lanes : {1U, kMaxLanes})
         for (const bool float32 : {false, true}) bufferExtents(backend, shape, LinearInput::Table16, float32, lanes);
-    // Table16 feeds the register tile after norms that are F32 (a GGUF's, in
-    // tiled head order) or bf16 (an MLX target's, grouped).
-    for (const GdnShape &shape : kShapes)
-      for (uint32_t lanes = 1; lanes <= kMaxLanes; ++lanes) {
-        fusedPreparation(backend, shape, lanes, LinearInput::Table16, true);
-        tiledHeadOrder(backend, shape, lanes, LinearInput::Table16, true);
-        fusedPreparation(backend, shape, lanes, LinearInput::Table16, false);
-      }
+    // Table16 (Table16F on Apple7/8) feeds the register tile after norms that are F32 (a GGUF's, in tiled head
+    // order) or bf16 (an MLX target's, grouped).
+    for (const LinearInput table : {LinearInput::Table16, LinearInput::Table16F})
+      for (const GdnShape &shape : kShapes)
+        for (uint32_t lanes = 1; lanes <= kMaxLanes; ++lanes) {
+          fusedPreparation(backend, shape, lanes, table, true);
+          tiledHeadOrder(backend, shape, lanes, table, true);
+          fusedPreparation(backend, shape, lanes, table, false);
+        }
     // A GGUF's out-projection on the staged tile reads the tiled rows plain.
     for (const GdnShape &shape : kShapes)
       for (uint32_t lanes = 1; lanes <= kMaxLanes; ++lanes)
@@ -1269,12 +1270,12 @@ int main(int argc, char **argv) {
     for (const GdnShape &shape : kShapes)
       for (bool float32 : {false, true})
         for (GdnHeadOrder order : {GdnHeadOrder::Grouped, GdnHeadOrder::Tiled})
-          for (LinearInput layout : {LinearInput::Plain, LinearInput::Table16})
+          for (LinearInput layout : {LinearInput::Plain, LinearInput::Table16, LinearInput::Table16F})
             replayAcrossBatches(backend, shape, float32, order, layout);
     for (const GdnShape &shape : kShapes)
       for (const uint32_t lanes : {1U, kMaxLanes})
         for (bool float32 : {false, true})
-          for (LinearInput layout : {LinearInput::Plain, LinearInput::Table16})
+          for (LinearInput layout : {LinearInput::Plain, LinearInput::Table16, LinearInput::Table16F})
             bfloatState(backend, shape, lanes, float32, layout);
     std::cout << "gdn_decode_metal_test: PASS\n";
     return 0;
