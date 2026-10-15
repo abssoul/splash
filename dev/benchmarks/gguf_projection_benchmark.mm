@@ -142,7 +142,9 @@ int main(int argc, char **argv) {
                                              [](const Image &i) { return quant_register_format(i.format); }))
               continue;
             if (registerTile ? K / 256 < splits : (K / 32) % splits) continue;
-            const LinearConfig config{.tile = tile, .splits = splits, .spread = !registerTile && policy.spread};
+            // Apple7/8's register tile reads an fp32 table.
+            const LinearConfig config{.tile = tile, .splits = splits, .spread = !registerTile && policy.spread,
+                                      .fp32Table = registerTile && backend.capabilities().appleGpuFamily < 9};
             cases.push_back({"L" + std::to_string(lanes),
                              std::string(registerTile ? "register" : "staged") + " S" + std::to_string(splits),
                              Linear::plan(w, config, FloatOutput::BFloat16), config == policy, {}});
