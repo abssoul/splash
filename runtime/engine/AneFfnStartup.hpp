@@ -58,6 +58,9 @@ struct AneFfnModel final {
   std::function<uint64_t(uint32_t aneUnits)> plannedBytes;
   // Calibration's timings (ops::ane_ffn::Measurement::time).
   std::function<ops::ane_ffn::Timings()> time;
+  // The split layer of full chunks with the ANE taking `aneUnits` units, less
+  // the GPU alone's `gpuAlone` of time() (ops::ane_ffn::Measurement::split).
+  std::function<double(uint32_t aneUnits, double gpuAlone)> timeSplit;
   // The split that serves with the ANE taking `aneUnits`, verified, with its
   // chunks timed (ops::ane_ffn::Measurement::chunks) when `timeChunks`. A
   // model a test plays prepares no split.

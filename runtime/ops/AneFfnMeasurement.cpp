@@ -17,6 +17,8 @@ constexpr std::array<double, 2> kTimedShares{0.4, 0.8};
 // The layers time() spreads over the model; each of its commands takes all
 // but the last, which gives the last one's next weights to stage.
 constexpr uint32_t kSampledLayers = 5;
+// The rows of time()'s chunks, a full chunk's, and its layers to a command.
+constexpr uint32_t kRows = AneFfn::kMaximumRows, kCount = kSampledLayers - 1;
 // The rows of layers of each command chunks() times, and the runs of each
 // command.
 constexpr uint32_t kCommandRows = 2 * AneFfn::kMaximumRows, kRuns = 3;
@@ -109,13 +111,17 @@ double Measurement::gpuPart(std::span<const SwiGluProjections> layers, AneFfn &s
   return usable((command(count) - command(1)) / (count - 1));
 }
 
+// A model of fewer layers times some twice.
+std::vector<SwiGluProjections> Measurement::sampled() const {
+  std::vector<SwiGluProjections> layers;
+  for (uint32_t index = 0; index < kSampledLayers; ++index)
+    layers.push_back(layers_[index * (layers_.size() - 1) / (kSampledLayers - 1)]);
+  return layers;
+}
+
 Timings Measurement::time() {
   const uint32_t units = AneFfn::units(layers_);
-  // A model of fewer layers times some twice.
-  std::vector<SwiGluProjections> sampled;
-  for (uint32_t index = 0; index < kSampledLayers; ++index)
-    sampled.push_back(layers_[index * (layers_.size() - 1) / (kSampledLayers - 1)]);
-  constexpr uint32_t kRows = AneFfn::kMaximumRows, kCount = kSampledLayers - 1;
+  const std::vector<SwiGluProjections> sampled = this->sampled();
   Timings timings;
   timings.gpuAlone = layer(sampled, kCount, kRows);
   const auto measure = [&](double share) {
@@ -127,6 +133,12 @@ Timings Measurement::time() {
   timings.low = measure(kTimedShares[0]);
   timings.high = measure(kTimedShares[1]);
   return timings;
+}
+
+double Measurement::split(uint32_t aneUnits, double gpuAlone) {
+  const std::vector<SwiGluProjections> sampled = this->sampled();
+  AneFfn split(backend_, sampled, aneUnits, interrupted_, std::array{kRows});
+  return layer(sampled, kCount, kRows, &split, gpuAlone);
 }
 
 ChunkTimings Measurement::chunks(AneFfn &split) {

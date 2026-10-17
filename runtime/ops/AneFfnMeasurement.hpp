@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <functional>
 #include <span>
+#include <vector>
 
 namespace splash::ops::ane_ffn {
 
@@ -28,6 +29,10 @@ public:
   // differ with depth: a program of one function of a full chunk's rows
   // each, which the ANE's service keeps once compiled.
   [[nodiscard]] Timings time();
+  // The split layer of full chunks with the ANE taking `aneUnits`, on the
+  // layers time() takes, less `gpuAlone`, time()'s GPU alone of them: what
+  // refine() weighs the units choose() took against their neighbours by.
+  [[nodiscard]] double split(uint32_t aneUnits, double gpuAlone);
   // The GPU alone over the least and the most rows of `split`'s functions,
   // and `split` over a chunk of the rows of each of its functions, on the
   // first layers.
@@ -41,6 +46,8 @@ private:
   [[nodiscard]] double layer(std::span<const SwiGluProjections> layers, uint32_t count, uint32_t rows,
                              AneFfn *split = nullptr, double standIn = 0.0);
   [[nodiscard]] double gpuPart(std::span<const SwiGluProjections> layers, AneFfn &split);
+  // The layers time() spreads over the model.
+  [[nodiscard]] std::vector<SwiGluProjections> sampled() const;
 
   metal::MetalBackend &backend_;
   std::span<const SwiGluProjections> layers_;

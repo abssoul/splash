@@ -908,6 +908,13 @@ AneFfnModel aneFfnModel(metal::MetalBackend &backend, const model::LoadedModel &
     });
     return timings;
   };
+  model.timeSplit = [&backend, layers, cancelled, onArena](uint32_t aneUnits, double gpuAlone) {
+    double milliseconds = 0.0;
+    onArena([&](const ops::PrefillFfnBuffers &ffn, const std::array<metal::MetalBuffer, 2> &hidden) {
+      milliseconds = ops::ane_ffn::Measurement(backend, *layers, ffn, hidden, cancelled).split(aneUnits, gpuAlone);
+    });
+    return milliseconds;
+  };
   model.prepare = [&backend, layers, cancelled, onArena](uint32_t aneUnits, bool timeChunks) {
     AneFfnPrepared prepared;
     onArena([&](const ops::PrefillFfnBuffers &ffn, const std::array<metal::MetalBuffer, 2> &hidden) {

@@ -159,6 +159,11 @@ AneFfnStart decide(const AneFfnModel &model, const AneFfnSetting &setting, Reque
     return text.str();
   };
   const std::string layer = " ms per " + std::to_string(ops::AneFfn::kMaximumRows) + "-row FFN layer";
+  const auto share = [&](uint32_t aneUnits) {
+    std::ostringstream text;
+    text << std::fixed << std::setprecision(2) << static_cast<double>(aneUnits) / model.units;
+    return text.str();
+  };
   const auto fixed = [](double value) {
     std::ostringstream text;
     text << std::fixed << std::setprecision(1) << value;
@@ -218,12 +223,15 @@ AneFfnStart decide(const AneFfnModel &model, const AneFfnSetting &setting, Reque
     }
 
     const ane_ffn::Timings timings = model.time();
-    const std::optional<uint32_t> chosen =
+    const std::optional<uint32_t> fitted =
         ane_ffn::choose(ane_ffn::fit(timings.low, timings.high), timings.gpuAlone, model.units, maxAneUnits);
-    if (!chosen)
+    if (!fitted)
       return noGain("no Neural Engine split beats its " + fixed(timings.gpuAlone) + layer +
                     " by enough (calibrated in " + seconds() + ")");
-    AneFfnPrepared prepared = model.prepare(*chosen, true);
+    // The fit's units, or a neighbour's that their timings show faster.
+    const uint32_t chosen = ane_ffn::refine(
+        *fitted, maxAneUnits, [&](uint32_t aneUnits) { return model.timeSplit(aneUnits, timings.gpuAlone); });
+    AneFfnPrepared prepared = model.prepare(chosen, true);
     const ane_ffn::ChunkTimings &chunks = prepared.chunks;
     if (chunks.functions.empty()) throw std::logic_error("the split's chunks were not timed");
     const std::string timed =
@@ -232,9 +240,10 @@ AneFfnStart decide(const AneFfnModel &model, const AneFfnSetting &setting, Reque
     if (!minimumRows)
       return noGain("no chunk of the Neural Engine split beats it by enough, " + timed + " (calibrated in " +
                     seconds() + ")");
-    const ane_ffn::Calibration made{*chosen, *minimumRows, chunks.gpu};
+    const ane_ffn::Calibration made{chosen, *minimumRows, chunks.gpu};
     take(prepared, made);
-    AneFfnStart start = serve(std::move(prepared), *chosen, *minimumRows, ": " + timed + " on the GPU alone",
+    const std::string refined = chosen == *fitted ? "" : ", refined from the fit's share " + share(*fitted);
+    AneFfnStart start = serve(std::move(prepared), chosen, *minimumRows, ": " + timed + " on the GPU alone" + refined,
                               "calibrated");
     model.remember(maxAneUnits, made);
     return start;
