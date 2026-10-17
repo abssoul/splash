@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -61,6 +62,14 @@ struct Model final {
 // of the GPU alone.
 [[nodiscard]] std::optional<uint32_t> choose(const Model &model, double gpuAlone, uint32_t units,
                                              uint32_t maxAneUnits);
+// The units, from `chosen` within one to `maxAneUnits`, whose split layer of
+// a full chunk `timed` measures least, moving a unit at a time while each
+// gains enough (AneFfnCalibration.cpp): the fit through two shares can put
+// choose()'s units off the fastest on a Mac whose parts are not the lines it
+// assumes. Throws for `chosen` outside those units or a timing that is not
+// usable().
+[[nodiscard]] uint32_t refine(uint32_t chosen, uint32_t maxAneUnits,
+                              const std::function<double(uint32_t aneUnits)> &timed);
 
 // A chunk's FFN layer in milliseconds: the GPU's alone at the least and the
 // most rows of the split's functions, and the split's of each function, from

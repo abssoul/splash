@@ -256,6 +256,37 @@ void testBreaker() {
 
 } // namespace
 
+// Refinement weighs the fit's units against their neighbours: a split layer of 10 ms at 12 units and 0.3 ms more a
+// unit either way (2.7-2.9% a unit near its least) moves the fit's 15 down and its 9 up to 12, timing a unit below
+// first; at the least it stays, after timing a unit either way; it moves at most 3 units, and not for gains under 2%
+// a unit, nor past one unit or the most units.
+void testRefine() {
+  std::vector<uint32_t> timedUnits;
+  const auto vee = [&](double slope) {
+    return [&timedUnits, slope](uint32_t aneUnits) {
+      timedUnits.push_back(aneUnits);
+      return 10.0 + slope * std::abs(static_cast<double>(aneUnits) - 12.0);
+    };
+  };
+  require(refine(15, 33, vee(0.3)) == 12u && timedUnits == std::vector<uint32_t>{15, 14, 13, 12},
+          "the fit's units above the least did not move down to it");
+  timedUnits.clear();
+  require(refine(9, 33, vee(0.3)) == 12u && timedUnits == std::vector<uint32_t>{9, 8, 10, 11, 12},
+          "the fit's units below the least did not move up to it");
+  timedUnits.clear();
+  require(refine(12, 33, vee(0.3)) == 12u && timedUnits == std::vector<uint32_t>{12, 11, 13},
+          "the least moved or was not timed a unit either way");
+  require(refine(20, 33, vee(0.3)) == 17u, "the refinement moved more than 3 units");
+  require(refine(14, 33, vee(0.15)) == 14u, "a gain under 2% a unit moved the fit's units");
+  require(refine(1, 33, vee(-0.3)) == 1u && refine(8, 8, vee(0.3)) == 8u,
+          "the refinement moved past one unit or the most units");
+  for (const auto &[chosen, most] : {std::pair{0u, 33u}, std::pair{9u, 8u}})
+    rejects([&] { static_cast<void>(refine(chosen, most, vee(0.3))); }, "no feasible units",
+            "a refinement of " + std::to_string(chosen) + " units of at most " + std::to_string(most));
+  rejects([] { static_cast<void>(refine(12, 33, [](uint32_t) { return std::numeric_limits<double>::quiet_NaN(); })); },
+          "not usable", "a timing of NaN refined units");
+}
+
 int main() {
   try {
     testFit();
@@ -263,6 +294,7 @@ int main() {
     testChoice();
     testUnusable();
     testMostUnits();
+    testRefine();
     testNoGain();
     testUsable();
     testNearestUnits();

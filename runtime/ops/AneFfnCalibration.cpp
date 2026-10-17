@@ -20,6 +20,10 @@ constexpr double kMinimumGain = 0.05;
 // a prefill, so a chunk that splits within this prefills at most about 1%
 // slower.
 constexpr double kChunkNoise = 0.02;
+// The gain on a full chunk's split layer at which refine() moves a unit, and
+// the most units it moves.
+constexpr double kRefineGain = 0.02;
+constexpr uint32_t kRefineSteps = 3;
 // The first word of a Calibration's text, which a change to its fields
 // renumbers.
 constexpr std::string_view kCalibrationTag = "ane-ffn-calibration-1";
@@ -99,6 +103,33 @@ std::optional<uint32_t> choose(const Model &model, double gpuAlone, uint32_t uni
     if (longest(aneUnits) < longest(chosen)) chosen = aneUnits;
   if (!(at[chosen] <= (1.0 - kMinimumGain) * gpuAlone)) return std::nullopt;
   return chosen;
+}
+
+// T falls steeply on either side of where the parts meet: on an M1 Max with
+// Qwen3.8-27B a 14K prefill runs 202 tok/s at 17 of 34 units and 193 at 15
+// and at 19, so a choice two units off costs 5%. The fit can put it there on
+// a Mac whose parts are not the lines it assumes, so the units it chooses are
+// timed against their neighbours: a unit below first, then a unit above
+// unless below gained, moving on while each unit takes kRefineGain less, for
+// at most kRefineSteps units. A unit of the M1 Max's gains about 2.5% near
+// the least, and timings that spread over a few percent move at most those
+// steps.
+uint32_t refine(uint32_t chosen, uint32_t maxAneUnits, const std::function<double(uint32_t aneUnits)> &timed) {
+  if (!chosen || chosen > maxAneUnits) throw std::invalid_argument("ANE FFN refinement of no feasible units");
+  uint32_t best = chosen;
+  double least = usable(timed(chosen));
+  for (const int direction : {-1, 1}) {
+    for (uint32_t step = 0; step < kRefineSteps; ++step) {
+      const long next = static_cast<long>(best) + direction;
+      if (next < 1 || next > static_cast<long>(maxAneUnits)) break;
+      const double milliseconds = usable(timed(static_cast<uint32_t>(next)));
+      if (!(milliseconds <= (1.0 - kRefineGain) * least)) break;
+      best = static_cast<uint32_t>(next);
+      least = milliseconds;
+    }
+    if (best != chosen) break;
+  }
+  return best;
 }
 
 // A chunk splits while its function's split layer takes at most kChunkNoise

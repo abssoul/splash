@@ -9,6 +9,7 @@
 #include "engine/AneFfnStartup.hpp"
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
@@ -91,6 +92,8 @@ struct Fake {
   std::optional<std::string> unavailable;
   uint64_t unitBytes = 256 * kMiB;
   std::function<Timings()> time = measured;
+  // The split layer of full chunks by its units, the same at every count unless a test sets it.
+  std::function<double(uint32_t)> split = [](uint32_t) { return 13.0; };
   std::function<AneFfnPrepared(uint32_t, bool)> prepare = [](uint32_t, bool timed) {
     AneFfnPrepared prepared;
     if (timed) prepared.chunks = timedChunks(15.5);
@@ -105,6 +108,7 @@ struct Fake {
   // The calls the start made: of unavailable() and time(), and of prepare() with its arguments.
   uint32_t asked = 0, timings = 0;
   std::optional<std::pair<uint32_t, bool>> prepared;
+  std::vector<uint32_t> splitsTimed;
 
   [[nodiscard]] uint64_t bytes(uint32_t aneUnits) const { return aneUnits * unitBytes; }
   // What the plan holds with the largest split the model could take, the most units whose plan holds any: the
@@ -128,6 +132,11 @@ struct Fake {
     result.time = [this] {
       ++timings;
       return time();
+    };
+    result.timeSplit = [this](uint32_t aneUnits, double gpuAlone) {
+      require(gpuAlone == time().gpuAlone, "the split was timed against another GPU alone");
+      splitsTimed.push_back(aneUnits);
+      return split(aneUnits);
     };
     result.prepare = [this](uint32_t aneUnits, bool timeChunks) {
       prepared = {aneUnits, timeChunks};
@@ -568,6 +577,25 @@ void testRemembered() {
   }
 }
 
+// A calibration takes the units its timings refine the fit's to, logs the fit's share beside them and remembers
+// them; with timings that show no faster neighbour it takes the fit's 8 units, timed a unit either way.
+void testRefined() {
+  Fake fake;
+  fake.split = [](uint32_t aneUnits) { return 10.0 + 0.4 * std::abs(static_cast<double>(aneUnits) - 10.0); };
+  Started started = start(fake);
+  require(started.start.outcome.kind == Kind::Split && fake.splitsTimed == std::vector<uint32_t>{8, 7, 9, 10, 11} &&
+              fake.prepared == std::pair(10u, true) && fake.remembered && fake.remembered->aneUnits == 10 &&
+              started.start.plan && started.start.plan->breakdown().aneFfnBytes == fake.bytes(10) &&
+              has(started.log, "Neural Engine FFN split at share 0.29 for chunks of ") &&
+              has(started.log, " on the GPU alone, refined from the fit's share 0.24, "),
+          "the refined units were not taken: " + started.log);
+  fake = {};
+  started = start(fake);
+  require(started.start.outcome.kind == Kind::Split && fake.splitsTimed == std::vector<uint32_t>{8, 7, 9} &&
+              fake.prepared == std::pair(8u, true) && !has(started.log, "refined"),
+          "timings of no faster neighbour moved the fit's units: " + started.log);
+}
+
 // A given share runs the units nearest it, untimed, over the chunks given, and is not remembered; a given split
 // of no units or of rows no function holds is refused.
 void testGivenShare() {
@@ -614,6 +642,7 @@ int main() {
     testFailures();
     testNoGain();
     testRemembered();
+    testRefined();
     testGivenShare();
     std::cout << "ane ffn startup tests passed\n";
     return EXIT_SUCCESS;
