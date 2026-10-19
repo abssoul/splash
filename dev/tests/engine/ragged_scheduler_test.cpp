@@ -655,6 +655,23 @@ void testConfiguredPrefillBoundSetsCommandLength() {
   }
 }
 
+// With tail alignment the isolated bound takes the most whole multiples of it
+// that fit, and halves to the floor only below one: at 5 ms a row two
+// seconds fit 400 rows, 384 aligned and 256 halved, and at 32 ms 62 rows.
+void testAlignedPrefillBoundKeepsWholeMultiples() {
+  for (const auto [alignment, perRow, rows] :
+       {std::tuple{128u, 5.0, 384u}, std::tuple{0u, 5.0, 256u}, std::tuple{128u, 32.0, 64u}}) {
+    engine::Scheduler scheduler(0.0);
+    scheduler.alignPrefillTails(alignment);
+    scheduler.boundIsolatedPrefill(engine::kDefaultPrefillCommandMilliseconds);
+    scheduler.submit(request(1, 200'000));
+    scheduler.resourcesReady(1, 0);
+    completePrefill(scheduler, *scheduler.next({}), 2048 * perRow);
+    require(scheduler.next({})->items[0].tokenCount == rows,
+            "the aligned prefill bound did not keep whole multiples of its alignment");
+  }
+}
+
 void testPrefillBoundCoversEachCommandBuffer() {
   // 30 ms per row with the command split into 16 buffers: a buffer of a
   // 2048-row command holds about 3.8 s and one of 1024 rows 1.9 s, so the
@@ -1177,6 +1194,7 @@ int main() {
     testShortestRemainingFirstUsesActualRows();
     testShortenedPrefillResumesFromItsRows();
     testAlignedPrefillLeavesItsTail();
+    testAlignedPrefillBoundKeepsWholeMultiples();
     testEqualPromptsFinishInArrivalOrder();
     testShortArrivalPrecedesLongColdPrompt();
     testEqualLanesRunInArrivalOrderWithoutOvertaking();

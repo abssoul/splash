@@ -642,8 +642,9 @@ public:
   // command (the scheduler's isolated prefill bound). One by default.
   [[nodiscard]] virtual uint32_t prefillCommandBuffers() const noexcept { return 1; }
   // The rows a prompt's last prefill command ends on a multiple of, its
-  // few rows past that left to a command of their own (Scheduler::
-  // alignPrefillTails); none by default.
+  // few rows past that left to a command of their own, and bounded prefill
+  // commands hold a multiple of (Scheduler::alignPrefillTails); none by
+  // default.
   [[nodiscard]] virtual uint32_t prefillTailAlignment() const noexcept { return 0; }
   virtual void end(uint64_t requestId) = 0;
 };
