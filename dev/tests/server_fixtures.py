@@ -794,6 +794,8 @@ def main_args(**overrides):
             "cache_dir": None,
             "decode_share": None,
             "disable_ane": False,
+            "ane_ffn_share": None,
+            "ane_ffn_minimum_rows": None,
             "max_image_pixels": images.MAX_PIXELS,
             "request_timeout": None,
             "queue_size": 1,

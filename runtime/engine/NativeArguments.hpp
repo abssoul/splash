@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <stdexcept>
 
 namespace splash::engine {
@@ -53,6 +54,11 @@ struct NativeArguments final {
   // Neural Engine when that is faster (splash serve --disable-ane turns it
   // off).
   bool neuralEngine = true;
+  // --ane-ffn-share SHARE and --ane-ffn-minimum-rows ROWS: the split's share
+  // and least chunk rows as given, none to calibrate them
+  // (AneFfnSetting::fromGiven); neither with --ane off.
+  std::optional<double> aneFfnShare;
+  std::optional<uint32_t> aneFfnMinimumRows;
   // --prefill-mode bounded|full and --prefill-bound-ms: the isolated prefill
   // command bound (Scheduler.hpp), infinite for full.
   double prefillCommandMilliseconds = EngineConfig{}.prefillCommandMilliseconds;

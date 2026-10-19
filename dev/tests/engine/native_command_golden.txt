@@ -28,6 +28,10 @@ image_patches_rounded | --max-image-pixels 1000000 | auto auto --max-image-patch
 image_patches_default | --max-image-pixels 4194304 | auto auto
 idle_sleep | --allow-idle-sleep | auto auto --idle-sleep allow
 disable_ane | --disable-ane | auto auto --ane off
+ane_ffn_share | --ane-ffn-share 0.35 | auto auto --ane-ffn-share 0.35
+ane_ffn_rows | --ane-ffn-share 0.35 --ane-ffn-minimum-rows 520 | auto auto --ane-ffn-share 0.35 --ane-ffn-minimum-rows 520
+ane_ffn_gpu | --ane-ffn-share 0 | auto auto --ane-ffn-share 0.0
+ane_ffn_disabled | --disable-ane --ane-ffn-share 0.35 --ane-ffn-minimum-rows 520 | auto auto --ane off
 prefill_full | --prefill-mode full | auto auto --prefill-mode full
 prefill_bound | --prefill-bound-ms 3000 | auto auto --prefill-bound-ms 3000
 prefill_bound_command | --prefill-bound-scope command | auto auto --prefill-bound-scope command

@@ -78,6 +78,19 @@ OPTIONS = {
         ("layer", "", "Command"),
     ),
     "--disable-ane": ([(["--disable-ane"], True)], []),
+    "--ane-ffn-share": (
+        values("--ane-ffn-share", {"0": 0.0, "0.35": 0.35, "0.999": 0.999}, ())[0],
+        [
+            *values("--ane-ffn-share", {}, ("1", "-0.1", "nan", "inf", "half"))[1],
+        ],
+    ),
+    "--ane-ffn-minimum-rows": (
+        [(["--ane-ffn-minimum-rows=520", "--ane-ffn-share=0.35"], 520)],
+        [
+            ["--ane-ffn-minimum-rows=520"],
+            *values("--ane-ffn-minimum-rows", {}, ("0", "-1", "1.5", "rows"))[1],
+        ],
+    ),
     "--max-memory": values(
         "--max-memory",
         {

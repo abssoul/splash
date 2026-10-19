@@ -152,6 +152,15 @@ void testServerCommandLines(const char *path) {
        [](NativeArguments &read) { read.maxImagePatches = 16384; }},
       {"idle_sleep", [](NativeArguments &read) { read.preventIdleSleep = false; }},
       {"disable_ane", [](NativeArguments &read) { read.neuralEngine = false; }},
+      {"ane_ffn_share", [](NativeArguments &read) { read.aneFfnShare = 0.35; }},
+      {"ane_ffn_rows",
+       [](NativeArguments &read) {
+         read.aneFfnShare = 0.35;
+         read.aneFfnMinimumRows = 520;
+       }},
+      {"ane_ffn_gpu", [](NativeArguments &read) { read.aneFfnShare = 0.0; }},
+      // --disable-ane outranks a share, which the server then leaves out.
+      {"ane_ffn_disabled", [](NativeArguments &read) { read.neuralEngine = false; }},
       {"prefill_full",
        [](NativeArguments &read) {
          read.prefillCommandMilliseconds = engine::kUnboundedPrefillCommand;
@@ -181,7 +190,8 @@ void testServerCommandLines(const char *path) {
            read.maxImagePatches == meant.maxImagePatches &&
            read.idleReleaseSeconds == meant.idleReleaseSeconds &&
            read.preventIdleSleep == meant.preventIdleSleep &&
-           read.neuralEngine == meant.neuralEngine &&
+           read.neuralEngine == meant.neuralEngine && read.aneFfnShare == meant.aneFfnShare &&
+           read.aneFfnMinimumRows == meant.aneFfnMinimumRows &&
            read.prefillCommandMilliseconds == meant.prefillCommandMilliseconds &&
            read.prefillBoundPerBuffer == meant.prefillBoundPerBuffer;
   };
@@ -237,6 +247,15 @@ void testRefusals() {
   refuses({"auto", "auto", "--idle-sleep", "never"},
           "--idle-sleep requires prevent or allow");
   refuses({"auto", "auto", "--ane", "gpu"}, "--ane requires on or off");
+  for (const char *share : {"1", "-0.1", "nan", "inf", "half", ""})
+    refuses({"auto", "auto", "--ane-ffn-share", share}, "--ane-ffn-share requires a share in [0, 1)");
+  for (const char *rows : {"0", "-1", "1.5", "rows"})
+    refuses({"auto", "auto", "--ane-ffn-share", "0.35", "--ane-ffn-minimum-rows", rows},
+            "--ane-ffn-minimum-rows requires a positive row count");
+  refuses({"auto", "auto", "--ane-ffn-minimum-rows", "520"},
+          "--ane-ffn-minimum-rows requires --ane-ffn-share");
+  refuses({"auto", "auto", "--ane", "off", "--ane-ffn-share", "0.35"},
+          "--ane-ffn-share requires --ane on");
   refuses({"auto", "auto", "--persistent-cache", "yes"}, "--persistent-cache requires on or off");
   refuses({"auto", "auto", "0", "--persistent-cache", "on"},
           "--persistent-cache requires an SSD cache, which MAX_CACHE_DISK_BYTES 0 turns off");
