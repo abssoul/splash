@@ -485,7 +485,11 @@ void Linear::addGgufPrefill(metal::CommandGraph &graph, const LinearBuffers &b,
   const auto [n, k] = w.matrix;
   const char epilogue = epilogueSuffix(w.epilogue);
   const bool mma = mmaTiles(family_);
-  const uint32_t rowTiles = plan.storageRows() / (mma ? kMmaPrefillRows : GGUF_PREFILL_ROWS);
+  // The MMA tiles stop at the chunk's last row: a 64-row tile past it would
+  // stream the weights for no row, which on an M1 Max made a 136-row chunk's
+  // projection cost 1.5 times a 128-row one's.
+  const uint32_t rowTiles =
+      mma ? (w.rows + kMmaPrefillRows - 1) / kMmaPrefillRows : plan.storageRows() / GGUF_PREFILL_ROWS;
   // Apple7/8's MMA tiles run one dispatch per segment.
   if (w.epilogue == LinearEpilogue::None && !p.planeInputs() && !mma) {
     const std::vector<QuantizedSegment> &segments = p.blocks().segments;
