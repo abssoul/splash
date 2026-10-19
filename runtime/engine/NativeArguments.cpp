@@ -81,6 +81,13 @@ double parseDecodeShare(std::string_view value) {
   return result;
 }
 
+double parseAneFfnShare(std::string_view value) {
+  double result = 0.0;
+  if (!parseFinite(value, result) || !(result >= 0.0 && result < 1.0))
+    throw UsageError("--ane-ffn-share requires a share in [0, 1)");
+  return result;
+}
+
 std::filesystem::path requireModelRoot(std::string_view argument) {
   std::error_code error;
   const std::filesystem::path root =
@@ -151,6 +158,13 @@ NativeArguments parseNativeArguments(int argc, const char *const *argv) {
       if (value != "on" && value != "off")
         throw UsageError("--ane requires on or off");
       result.neuralEngine = value == "on";
+    } else if (option == "--ane-ffn-share") {
+      result.aneFfnShare = parseAneFfnShare(value);
+    } else if (option == "--ane-ffn-minimum-rows") {
+      uint32_t rows = 0;
+      if (!parsePositive(value, rows))
+        throw UsageError("--ane-ffn-minimum-rows requires a positive row count");
+      result.aneFfnMinimumRows = rows;
     } else if (option == "--prefill-mode") {
       if (value != "bounded" && value != "full")
         throw UsageError("--prefill-mode requires bounded or full");
@@ -175,6 +189,10 @@ NativeArguments parseNativeArguments(int argc, const char *const *argv) {
     throw UsageError("--persistent-cache requires an SSD cache, which MAX_CACHE_DISK_BYTES 0 turns off");
   if (result.maxCacheDiskWritesBytes && !result.maxCacheDisk.automatic && !result.maxCacheDisk.bytes)
     throw UsageError("--max-cache-disk-writes requires an SSD cache, which MAX_CACHE_DISK_BYTES 0 turns off");
+  if (result.aneFfnMinimumRows && !result.aneFfnShare)
+    throw UsageError("--ane-ffn-minimum-rows requires --ane-ffn-share");
+  if (result.aneFfnShare && !result.neuralEngine)
+    throw UsageError("--ane-ffn-share requires --ane on");
   if (!result.cacheRoot.empty() && !result.persistentCache)
     throw UsageError("--cache-dir requires --persistent-cache on");
   result.modelRoot = requireModelRoot(argv[2]);

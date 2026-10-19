@@ -210,7 +210,10 @@ bootstrapConfig(const engine::NativeArguments &arguments) {
   config.resources.stateFormat = arguments.stateFormat;
   config.resources.maximumImagePatches = arguments.maxImagePatches;
   config.resources.idleReleaseSeconds = arguments.idleReleaseSeconds;
-  config.resources.aneFfn.enabled = arguments.neuralEngine;
+  config.resources.aneFfn =
+      arguments.neuralEngine
+          ? engine::AneFfnSetting::fromGiven(arguments.aneFfnShare, arguments.aneFfnMinimumRows)
+          : engine::AneFfnSetting{.enabled = false};
   config.resources.relaunchContext = arguments.relaunchContext;
   config.nativeLoop.engine.maxContext = arguments.maxContext;
   config.nativeLoop.engine.decodeShare = arguments.decodeShare;

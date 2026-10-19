@@ -1703,6 +1703,10 @@ def _native_command(
         )
     if args.disable_ane:
         command.extend(("--ane", "off"))
+    if args.ane_ffn_share is not None and not args.disable_ane:
+        command.extend(("--ane-ffn-share", str(args.ane_ffn_share)))
+    if args.ane_ffn_minimum_rows is not None and not args.disable_ane:
+        command.extend(("--ane-ffn-minimum-rows", str(args.ane_ffn_minimum_rows)))
     if args.decode_share is not None:
         command.extend(("--decode-share", str(args.decode_share)))
     if args.max_image_pixels != image_input.MAX_PIXELS:

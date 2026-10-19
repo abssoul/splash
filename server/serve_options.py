@@ -252,6 +252,26 @@ def parse_decode_share(value):
     return share
 
 
+def parse_ane_ffn_share(value):
+    try:
+        share = float(value)
+    except ValueError:
+        share = math.nan
+    if not 0 <= share < 1:
+        raise argparse.ArgumentTypeError("must be a share in [0, 1) such as 0.35")
+    return share
+
+
+def parse_ane_ffn_minimum_rows(value):
+    try:
+        rows = int(value)
+    except ValueError:
+        rows = 0
+    if rows <= 0:
+        raise argparse.ArgumentTypeError("must be a positive number of rows such as 512")
+    return rows
+
+
 def parse_max_image_pixels(value):
     try:
         pixels = int(value)
@@ -677,6 +697,29 @@ SERVE_OPTIONS = (
         ),
     ),
     ServeOption(
+        "--ane-ffn-share",
+        "requests",
+        dict(
+            type=parse_ane_ffn_share,
+            default=None,
+            metavar="SHARE",
+            help="the Neural Engine's share of a dense model's prefill FFN, "
+            "instead of the one calibration finds (default: calibrated; 0 "
+            "prefills on the GPU alone, as --disable-ane does whatever this says)",
+        ),
+    ),
+    ServeOption(
+        "--ane-ffn-minimum-rows",
+        "requests",
+        dict(
+            type=parse_ane_ffn_minimum_rows,
+            default=None,
+            metavar="ROWS",
+            help="the least rows of a prefill chunk that splits at "
+            "--ane-ffn-share (default: 256)",
+        ),
+    ),
+    ServeOption(
         "--allow-idle-sleep",
         "requests",
         dict(
@@ -723,6 +766,8 @@ def check_serve_arguments(parser, args):
         )
     if args.cache_dir is not None and not args.persistent_cache:
         parser.error("--cache-dir needs --persistent-cache")
+    if args.ane_ffn_minimum_rows is not None and args.ane_ffn_share is None:
+        parser.error("--ane-ffn-minimum-rows needs --ane-ffn-share")
 
 
 def serve_argv(args):
