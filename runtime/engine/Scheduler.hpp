@@ -87,6 +87,11 @@ public:
   // kUnboundedPrefillCommand restores full-budget commands whatever their
   // duration.
   void boundIsolatedPrefill(double milliseconds, uint32_t buffers = 1);
+  // A lane's prefill rows that finish its prompt more than two multiples of
+  // `rows` long and at most kPrefillTailRows past one end on that multiple,
+  // the rest in a later command (model::Model::prefillTailAlignment); none
+  // for zero, the default.
+  void alignPrefillTails(uint32_t rows) noexcept { prefillTailAlignment_ = rows; }
   void deferAdmission(uint64_t requestId);
   void waitForResources(uint64_t requestId);
   void waitForPrefix(uint64_t requestId);
@@ -176,6 +181,7 @@ private:
   double prefillMillisecondsPerToken_ = 0.0;
   double isolatedPrefillMilliseconds_ = kDefaultPrefillCommandMilliseconds;
   uint32_t isolatedPrefillBuffers_ = 1;
+  uint32_t prefillTailAlignment_ = 0;
   double decodeShare_;
   // Decode time that prefill still owes the lanes that decoded beside it
   // (not those waiting for a mask): equal-priority decode runs until its

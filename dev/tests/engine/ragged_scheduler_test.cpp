@@ -227,6 +227,33 @@ void testShortenedPrefillResumesFromItsRows() {
           "the shortened lane did not resume from the rows it ran");
 }
 
+// With tail alignment, a prompt's last rows a few past a multiple of it end
+// that command on the multiple and leave the rest to the next; rows that do
+// not finish the prompt, rows too far past, too few rows and no alignment
+// keep the whole budget.
+void testAlignedPrefillLeavesItsTail() {
+  const auto first = [](uint32_t alignment, uint32_t prompt) {
+    engine::Scheduler scheduler(0.0);
+    scheduler.alignPrefillTails(alignment);
+    scheduler.submit(request(1, prompt));
+    scheduler.resourcesReady(1, 0);
+    return scheduler.next({})->items.at(0).tokenCount;
+  };
+  require(first(128, 288) == 256 && first(128, 272) == 256 && first(128, 2080) == 2048,
+          "an aligned prompt's last command did not leave its tail");
+  require(first(128, 384) == 384 && first(128, 360) == 360 && first(128, 288 - 32 - 1) == 255 &&
+              first(128, 280) == 256 && first(0, 288) == 288 && first(128, 2048 + 4096 + 16) == 2048,
+          "tail alignment cut rows it must keep");
+  engine::Scheduler scheduler(0.0);
+  scheduler.alignPrefillTails(128);
+  scheduler.submit(request(1, 288));
+  scheduler.resourcesReady(1, 0);
+  completePrefill(scheduler, *scheduler.next({}));
+  const BatchPlan tail = *scheduler.next({});
+  require(tail.items.size() == 1 && tail.items[0].promptOffset == 256 && tail.items[0].tokenCount == 32,
+          "the aligned prompt's tail did not run next");
+}
+
 void testEqualPromptsFinishInArrivalOrder() {
   // Equal cold prompts are served oldest first, one whole budget at a time,
   // instead of an equal water-fill share that finishes them all at once.
@@ -1149,6 +1176,7 @@ int main() {
     testWarmupTimingSeedsFirstContendedCommand();
     testShortestRemainingFirstUsesActualRows();
     testShortenedPrefillResumesFromItsRows();
+    testAlignedPrefillLeavesItsTail();
     testEqualPromptsFinishInArrivalOrder();
     testShortArrivalPrecedesLongColdPrompt();
     testEqualLanesRunInArrivalOrderWithoutOvertaking();

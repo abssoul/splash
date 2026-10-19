@@ -2687,6 +2687,18 @@ uint32_t Runtime::prefillCommandBuffers() const noexcept {
   return std::max<uint32_t>(1, impl_->geometry.target.kvLayout.attentionLayers);
 }
 
+// Apple7/8 run a prefill chunk's projections in 128-row tiles (64-row MMA
+// tiles on Apple7) and its Neural Engine split in functions every 128 rows,
+// so a chunk a few rows past a multiple of 128 pays for a whole tile and
+// function more. On an M1 Max with Qwen3.8-27B, a 288-row append took 2153 ms
+// in one command and 1907 ms as 256 rows and 32, which 1.3.0 ran since every
+// boundary ended a command; the M5 Max's extra command costs 34-60 ms
+// against tiles it runs faster, so it keeps whole chunks.
+uint32_t Runtime::prefillTailAlignment() const noexcept {
+  const uint32_t family = impl_->backend.capabilities().appleGpuFamily;
+  return family == 7 || family == 8 ? 128 : 0;
+}
+
 uint64_t Runtime::snapshotBytes() const noexcept {
   return impl_->states.layout().cachedBytes();
 }
