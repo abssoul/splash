@@ -342,10 +342,19 @@ uint32_t Scheduler::prefillBudget(
       rows /= 2;
     return rows;
   };
+  // With tail alignment the isolated bound keeps the most whole multiples of
+  // it that fit, rather than halving: on an M1 Max a whole-command bound of
+  // 2 s at 10K of context halved to 256-row commands where 384 rows fit.
+  const auto alignedRows = [&](double milliseconds) {
+    const double fitting = milliseconds / prefillMillisecondsPerToken_;
+    if (fitting >= maximum) return maximum;
+    const uint32_t rows = static_cast<uint32_t>(fitting) / prefillTailAlignment_ * prefillTailAlignment_;
+    return rows ? rows : boundedRows(milliseconds);
+  };
   const uint32_t isolated =
-      std::isfinite(isolatedPrefillMilliseconds_)
-          ? boundedRows(isolatedPrefillMilliseconds_ * isolatedPrefillBuffers_)
-          : maximum;
+      !std::isfinite(isolatedPrefillMilliseconds_) ? maximum
+      : prefillTailAlignment_ ? alignedRows(isolatedPrefillMilliseconds_ * isolatedPrefillBuffers_)
+                              : boundedRows(isolatedPrefillMilliseconds_ * isolatedPrefillBuffers_);
   const uint32_t rows = boundedRows(kContendedPrefillMilliseconds);
   const uint32_t leaderRemaining =
       leader.request->spec.prefillTokens - leader.promptProcessed;

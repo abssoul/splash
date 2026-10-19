@@ -89,7 +89,8 @@ public:
   void boundIsolatedPrefill(double milliseconds, uint32_t buffers = 1);
   // A lane's prefill rows that finish its prompt more than two multiples of
   // `rows` long and at most kPrefillTailRows past one end on that multiple,
-  // the rest in a later command (model::Model::prefillTailAlignment); none
+  // the rest in a later command, and the isolated bound keeps whole multiples
+  // of `rows` rather than halving (model::Model::prefillTailAlignment); none
   // for zero, the default.
   void alignPrefillTails(uint32_t rows) noexcept { prefillTailAlignment_ = rows; }
   void deferAdmission(uint64_t requestId);
