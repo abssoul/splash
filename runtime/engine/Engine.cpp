@@ -70,6 +70,7 @@ Engine::Engine(EngineConfig config, Cache &cache, model::Model &model,
     throw std::invalid_argument("decode share must be nonnegative and finite");
   scheduler_.boundIsolatedPrefill(config_.prefillCommandMilliseconds,
                                   config_.prefillBoundPerBuffer ? model_.prefillCommandBuffers() : 1);
+  scheduler_.alignPrefillTails(model_.prefillTailAlignment());
 }
 
 void Engine::submit(EngineRequest value) {

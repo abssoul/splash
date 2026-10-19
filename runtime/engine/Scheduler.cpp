@@ -21,6 +21,9 @@ constexpr double kContendedPrefillMilliseconds = 500.0;
 // The fewest rows a contended prefill command is cut to, and the fewest whose
 // time measures prefill throughput: below it a command's fixed costs dominate.
 constexpr uint32_t kMinimumPrefillRows = 64;
+// The most rows past a multiple of the prefill tail alignment that a prompt's
+// last command leaves to one of their own: the decode tiles' rows.
+constexpr uint32_t kPrefillTailRows = 32;
 // The weight of a command's measured per-token time in the running estimate:
 // one unusually slow or fast command moves it a quarter of the way, and a
 // lasting change carries it within a few commands.
@@ -314,8 +317,11 @@ Scheduler::planPrefill(std::vector<PrefillRequestView> ready) const {
     if (!budget || view.request->spec.priority != selectedPriority ||
         plan.width() == model::ExecutionLimits::maximumBatchWidth)
       break;
-    const uint32_t rows =
-        std::min(view.request->spec.prefillTokens - view.promptProcessed, budget);
+    const uint32_t remaining = view.request->spec.prefillTokens - view.promptProcessed;
+    uint32_t rows = std::min(remaining, budget);
+    if (const uint32_t tail = prefillTailAlignment_ ? rows % prefillTailAlignment_ : 0;
+        rows == remaining && rows > 2 * prefillTailAlignment_ && tail && tail <= kPrefillTailRows)
+      rows -= tail;
     plan.items.push_back(
         {view.request->spec.id, rows, view.promptProcessed});
     budget -= rows;
