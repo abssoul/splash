@@ -161,7 +161,7 @@ follows upstream and does not run on M1/M2.
 
 ## Status
 
-- Stable: [1.3.2-m1.1](https://github.com/paperniuk/splash/releases/latest),
+- Stable: [1.3.2-m1.2](https://github.com/paperniuk/splash/releases/latest),
   upstream 1.3.2 plus the M1/M2 work.
 - Known gaps: the 35B MoE's expert kernels are not tuned for M1/M2 yet;
   GGUF models and Macs below 64 GB are covered by the kernel tests, not run
@@ -175,7 +175,9 @@ not upstream's.
 Splash is built by [Inco](https://github.com/incoai/splash); the
 [launch post](https://inco.ai/blog/splash/) explains its design. If this port
 is useful to you, please star the original too. The installer is based on
-npanj's `install-q8.sh`.
+npanj's `install-q8.sh`. Alexander Fedora
+([@ghisguth](https://github.com/ghisguth)) tested the port on an M2 Max and
+contributed the faster GGUF Q4_0 decode.
 
 Apache-2.0, see [LICENSE](LICENSE); the GGUF kernels include MIT-licensed
 material from llama.cpp, see [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).
