@@ -268,7 +268,9 @@ def parse_ane_ffn_minimum_rows(value):
     except ValueError:
         rows = 0
     if rows <= 0:
-        raise argparse.ArgumentTypeError("must be a positive number of rows such as 512")
+        raise argparse.ArgumentTypeError(
+            "must be a positive number of rows such as 512"
+        )
     return rows
 
 
