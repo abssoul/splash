@@ -13,6 +13,8 @@
 >   on an M1 Max. `--disable-ane` keeps everything on the GPU.
 > - **Decode on an M1 Max** (27B MLX 4-bit, 1.3.2-m1.1): about 61 tok/s on a code prompt, 46-60
 >   across code and prose prompts; chat prose is slower than code because fewer draft tokens hit.
+> - **Contributors:** Alexander Fedora ([@ghisguth](https://github.com/ghisguth)) tested the port on
+>   an M2 Max and contributed the faster GGUF Q4_0 decode.
 > - **M3 and newer:** use official Splash, `brew install incoai/tap/splash`.
 > - **M1/M2 problems:** open an issue here, not upstream.
 >
