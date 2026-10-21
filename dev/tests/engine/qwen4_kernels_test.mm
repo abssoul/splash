@@ -592,7 +592,11 @@ void qsaTest(MetalBackend &backend, QsaCase c) {
   const MetalBuffer cosT = scratch(backend, uint64_t{laneRows} * 32 * 4), sinT = scratch(backend, uint64_t{laneRows} * 32 * 4),
                     draftRope = scratch(backend, SPLASH_DRAFT_ROPE_PAIRS * 4);
   MetalBuffer queries = scratch(backend, uint64_t{laneRows} * H * D * 2), keys = scratch(backend, uint64_t{laneRows} * D * 2);
-  const ops::IndexerRows qsaRows{rows, firstPositions, {tables, indexOffset}, top, words, stride};
+  // The score's tile production runs on this GPU (ops::ExecutionPlans):
+  // Apple7/8 take the register tile.
+  const ops::AttentionTile scoreTile =
+      backend.capabilities().appleGpuFamily < 9 ? ops::AttentionTile::Register : ops::AttentionTile::Mpp;
+  const ops::IndexerRows qsaRows{rows, firstPositions, {tables, indexOffset}, top, words, stride, scoreTile};
   // Each lane's records `laneRecords` records apart.
   const uint32_t laneRecords = (rows + 3) / 4 + 1;
   std::vector<BlockIndexerBlock> blocks(uint64_t{lanes} * laneRecords);
@@ -861,6 +865,15 @@ void qsaSelectRefusesNarrowScratch(MetalBackend &backend) {
   };
   check(refused(32, 1056) && refused(33, 1024) && !refused(33, 1025),
         "QSA select refuses scores or bitmaps narrower than its rows' history");
+  // Each tile scores through its own kernel, the select through the shared one.
+  for (const auto &[tile, name] : {std::pair{ops::AttentionTile::Mpp, "block_indexer_score"},
+                                   std::pair{ops::AttentionTile::Register, "block_indexer_score_sgf"}}) {
+    CommandGraph graph;
+    ops::BlockIndexer::addSelect(graph, any, any, 8, any, {8, firstPositions, {tables, 0}, 512, 33, 1025, tile});
+    check(graph.dispatches().size() == 2 && graph.dispatches()[0].pipelineName == name &&
+              graph.dispatches()[1].pipelineName == "block_indexer_select",
+          std::string("QSA select scores through ") + name);
+  }
 }
 
 // The capture of a layer's output for the DFlash2 draft: each row's streams'

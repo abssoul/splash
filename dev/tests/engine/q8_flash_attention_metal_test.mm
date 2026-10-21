@@ -32,11 +32,14 @@ static_assert(kStride == SPLASH_VERIFY_CHUNK_STRIDE);
 // The production GQA geometries. The group size selects the kernel
 // specialization; the suffix names its pipelines. The group of twelve runs
 // the sparse kernels, which attend through block lists, bound before their
-// parameters, and read token-major values.
+// parameters, and read token-major values. The register tile
+// (paged_attention_sgf.h, sparse_attention_sgf.h), which Apple7/8 run, takes
+// the same bindings and grids with 32 threads per fused-row group.
 struct Shape {
   uint32_t kvHeads;
   uint32_t queryHeadsPerKvHead;
   const char *suffix;
+  bool registerTile = false;
   uint32_t queryHeads() const { return kvHeads * queryHeadsPerKvHead; }
   uint32_t fusedRows() const { return kRows * queryHeadsPerKvHead; }
   bool sparse() const { return queryHeadsPerKvHead == 12; }
@@ -46,13 +49,20 @@ struct Shape {
   }
   // A phase's ("verify" or "prefill") split and reduce entries.
   std::string split(const char *phase) const {
-    return std::string(phase) + (sparse() ? "_attention_q8_sparse" : "_attention_q8_split") + suffix;
+    return std::string(phase) + (sparse() ? "_attention_q8_sparse" : "_attention_q8_split") +
+           (registerTile ? "_sgf" : "") + suffix;
   }
+  NSUInteger splitThreads() const { return registerTile ? 32 * queryHeadsPerKvHead : 256; }
   std::string reduce(const char *phase) const {
     return std::string(phase) + (sparse() ? "_attention_sparse_reduce" : "_attention_reduce") + suffix;
   }
 };
-constexpr std::array<Shape, 3> kShapes{{{4, 6, ""}, {2, 8, "_kv2_g8"}, {2, 12, "_kv2_g12"}}};
+constexpr std::array<Shape, 6> kShapes{{{4, 6, ""},
+                                        {2, 8, "_kv2_g8"},
+                                        {2, 12, "_kv2_g12"},
+                                        {4, 6, "", true},
+                                        {2, 8, "_kv2_g8", true},
+                                        {2, 12, "_kv2_g12", true}}};
 
 using splash::test::require;
 
@@ -463,6 +473,10 @@ Pipelines makePipelines(id<MTLDevice> device, id<MTLLibrary> library,
   result.prefillSplitName = shape.split("prefill");
   result.prefillSplit = makePipeline(device, library, result.prefillSplitName);
   result.prefillReduce = makePipeline(device, library, shape.reduce("prefill"));
+  for (id<MTLComputePipelineState> split : {result.split, result.prefillSplit})
+    if (split.maxTotalThreadsPerThreadgroup < shape.splitThreads())
+      throw std::runtime_error(result.splitName + " takes at most " +
+                               std::to_string(split.maxTotalThreadsPerThreadgroup) + " threads");
   const uint64_t scratch = result.split.staticThreadgroupMemoryLength;
   std::cout << "pipeline=" << result.splitName << " threadgroup_bytes=" << scratch
             << (shaderValidationEnabled() ? " (instrumented by shader validation)" : "")
@@ -537,7 +551,7 @@ Dispatch dispatch(id<MTLDevice> device, id<MTLCommandQueue> queue,
   // The sparse split's grid is one-dimensional (ops::PagedAttention::verifyPlan).
   [encoder dispatchThreadgroups:shape.sparse() ? MTLSizeMake(shape.kvHeads * splits, 1, width)
                                                : MTLSizeMake(shape.kvHeads, splits, width)
-          threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+          threadsPerThreadgroup:MTLSizeMake(shape.splitThreads(), 1, 1)];
   [encoder setComputePipelineState:reduce];
   [encoder setBuffer:partials offset:0 atIndex:0];
   [encoder setBuffer:statistics offset:0 atIndex:1];
@@ -590,7 +604,7 @@ Dispatch dispatchPrefill(id<MTLDevice> device, id<MTLCommandQueue> queue,
   for (id<MTLBuffer> extent : data.extents)
     [encoder useResource:extent usage:MTLResourceUsageRead];
   [encoder dispatchThreadgroups:MTLSizeMake(shape.kvHeads, 1, splits)
-          threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+          threadsPerThreadgroup:MTLSizeMake(shape.splitThreads(), 1, 1)];
   [encoder setComputePipelineState:reduce];
   [encoder setBuffer:partials offset:0 atIndex:0];
   [encoder setBuffer:statistics offset:0 atIndex:1];
@@ -912,12 +926,19 @@ void run(const char *libraryPath) {
   if (!library)
     throw std::runtime_error(error.localizedDescription.UTF8String);
   id<MTLCommandQueue> queue = [device newCommandQueue];
+  // Apple7/8 run the register tile; the MPP sparse tile never runs there.
+  const bool registerDevice = ![device supportsFamily:MTLGPUFamilyApple9];
   for (const Shape shape : kShapes) {
-    for (uint32_t splits : {1U, 3U, 7U, 32U, 65U, 128U}) {
-      checkReduce(device, queue, library, shape, splits, kRows);
-      if (splits <= SPLASH_PREFILL_ATTENTION_MAXIMUM_SPLITS)
-        checkReduce(device, queue, library, shape, splits, 1);
+    // Both tiles share the reduce, which runs no tensor ops.
+    if (!shape.registerTile) {
+      for (uint32_t splits : {1U, 3U, 7U, 32U, 65U, 128U}) {
+        checkReduce(device, queue, library, shape, splits, kRows);
+        if (splits <= SPLASH_PREFILL_ATTENTION_MAXIMUM_SPLITS)
+          checkReduce(device, queue, library, shape, splits, 1);
+      }
     }
+    if (registerDevice && shape.sparse() && !shape.registerTile)
+      continue;
     const Pipelines pipelines = makePipelines(device, library, shape);
     for (uint32_t width = 1; width <= 4; ++width)
       runCase(device, queue, pipelines, shape, 127, 8, width);

@@ -72,9 +72,15 @@ std::string pipelineName(std::string_view phase, bool split, uint32_t queryHeads
 
 // The verify split that reads a sparse layout's listed blocks where their
 // locations name (ops::AttentionBlocks::locations).
-std::string locatedSplitName(kv::Layout layout) {
+std::string locatedSplitName(kv::Layout layout, ops::AttentionTile tile = ops::AttentionTile::Mpp) {
   return std::string("verify_attention_") + (layout.format == kv::Format::Int8 ? "q8" : "bf16") +
-         "_sparse_located_kv2_g12";
+         "_sparse_located" + (tile == ops::AttentionTile::Register ? "_sgf" : "") + "_kv2_g12";
+}
+
+// The tile production runs on this GPU (ops::ExecutionPlans): Apple7/8 take
+// the register tile, which never runs MPP tensor ops there.
+ops::AttentionTile deviceTile(const metal::MetalBackend &backend) {
+  return backend.capabilities().appleGpuFamily < 9 ? ops::AttentionTile::Register : ops::AttentionTile::Mpp;
 }
 
 void checkPrefillSlotOrientation(uint32_t queryHeads, kv::Layout layout) {
@@ -562,13 +568,13 @@ std::vector<uint16_t> run(metal::MetalBackend &backend, Case &data, bool testBou
   constexpr bool prefill = phase == Phase::Prefill;
   const auto plan = [&] {
     if constexpr (prefill)
-      return ops::PagedAttention::prefillPlan(data.rows, data.queryHeads, data.layout);
+      return ops::PagedAttention::prefillPlan(data.rows, data.queryHeads, data.layout, deviceTile(backend));
     else {
       std::vector<uint32_t> histories;
       for (uint32_t lane = 0; lane < data.lanes; ++lane)
         histories.push_back(data.stores[lane].committed_tokens);
       return ops::PagedAttention::verifyPlan(data.lanes, data.queryHeads, data.layout,
-                                            histories);
+                                            histories, deviceTile(backend));
     }
   }();
   constexpr uint64_t guardBytes = 256;
@@ -657,7 +663,7 @@ std::vector<uint16_t> run(metal::MetalBackend &backend, Case &data, bool testBou
     const auto &split = graph.dispatches()[first + 1];
     const auto &reduce = graph.dispatches()[first + 2];
     const std::string splitPipeline =
-        blocks.locations ? locatedSplitName(data.layout) : std::string(plan.splitPipeline);
+        blocks.locations ? locatedSplitName(data.layout, deviceTile(backend)) : std::string(plan.splitPipeline);
     require(split.pipelineName == splitPipeline && reduce.pipelineName == plan.reducePipeline &&
                 split.threadgroups.x == plan.splitGroups.x && split.threadgroups.y == plan.splitGroups.y &&
                 split.threadgroups.z == plan.splitGroups.z &&

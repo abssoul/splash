@@ -211,7 +211,7 @@ std::vector<ops::AttentionBlocks> Qwen4ExpTarget::addPrefillQsa(PrefillStep &ste
     const QwenTargetPrefillSequence &sequence = step.sequences[index];
     return ops::IndexerRows{sequence.rows, std::span(firstPositions).subspan(index, 1),
                             {{&sequence.indexTable, 1}, step.indexOffsets[layer]}, topBlocks, h.maskWords,
-                            h.scoreStride};
+                            h.scoreStride, operators_.attentionTile()};
   };
   addIndexerProjections(step.graph, linear, b.normalized, indexer, h.indexerQuery, h.indexerKey, step.rows);
   std::vector<ops::AttentionBlocks> blocks(step.sequences.size());
@@ -293,7 +293,7 @@ ops::AttentionBlocks Qwen4ExpTarget::addVerifyQsa(VerifyStep &step, const Qwen4I
   }
   const ops::IndexerRows qsa{kVerifyRows, std::span(firstPositions).first(step.lanes),
                              {std::span(b.indexTables).first(step.lanes), step.indexOffsets[layer]}, topBlocks,
-                             h.maskWords, h.scoreStride};
+                             h.maskWords, h.scoreStride, operators_.attentionTile()};
   const metal::MetalBuffer queries = rowsOf<uint16_t>(h.qsaQueries, 0, step.rows, queryWidth);
   // The layer's keys, which the commit reads after the last layer, and each
   // lane's pending keys before the step.

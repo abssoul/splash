@@ -15,6 +15,7 @@ class ExecutionPlans final {
 public:
   explicit ExecutionPlans(const DeviceCapabilities &device);
   [[nodiscard]] const Linear &linear() const noexcept { return linear_; }
+  [[nodiscard]] AttentionTile attentionTile() const noexcept { return attentionTile_; }
 
   [[nodiscard]] PrefillAttentionPlan prefillAttention(
       uint32_t rows, uint32_t queryHeads, kv::Layout layout) const;

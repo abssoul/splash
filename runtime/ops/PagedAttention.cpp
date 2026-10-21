@@ -185,16 +185,17 @@ PrefillAttentionPlan PagedAttention::prefillPlan(
   const uint32_t fusedRows =
       kv::kPrefillAttentionTileRows * (queryHeads / layout.kvHeads);
   const bool bf16 = layout.format == kv::Format::BFloat16;
-  // Sparse (Kv2Group12) attention has no register tile yet.
-  const bool registerTile = tile == AttentionTile::Register && kernel != KernelLayout::Kv2Group12;
+  const bool registerTile = tile == AttentionTile::Register;
   return {rows, splits,
           attentionWorkspace(uint64_t{tiles} * splits * layout.kvHeads * fusedRows,
                              layout.headDimension),
           registerTile
               ? bf16 ? pipeline(kernel, "prefill_attention_bf16_split_sgf",
-                                "prefill_attention_bf16_split_sgf_kv2_g8", {})
+                                "prefill_attention_bf16_split_sgf_kv2_g8",
+                                "prefill_attention_bf16_sparse_sgf_kv2_g12")
                      : pipeline(kernel, "prefill_attention_q8_split_sgf",
-                                "prefill_attention_q8_split_sgf_kv2_g8", {})
+                                "prefill_attention_q8_split_sgf_kv2_g8",
+                                "prefill_attention_q8_sparse_sgf_kv2_g12")
           : bf16 ? pipeline(kernel, "prefill_attention_bf16_split",
                             "prefill_attention_bf16_split_kv2_g8",
                             "prefill_attention_bf16_sparse_kv2_g12")
@@ -204,7 +205,7 @@ PrefillAttentionPlan PagedAttention::prefillPlan(
           pipeline(kernel, "prefill_attention_reduce",
                    "prefill_attention_reduce_kv2_g8", "prefill_attention_sparse_reduce_kv2_g12"),
           {layout.kvHeads, tiles, splits},
-          splitThreads(registerTile ? AttentionTile::Register : AttentionTile::Mpp, queryHeads, layout),
+          splitThreads(tile, queryHeads, layout),
           {layout.kvHeads, fusedRows, tiles}, layout.valuesTokenMajor, layout, queryHeads};
 }
 
@@ -227,15 +228,16 @@ VerifyAttentionPlan PagedAttention::verifyPlan(
     splits = std::max(splits, laneSplits[lane]);
   }
   const bool bf16 = layout.format == kv::Format::BFloat16;
-  // Sparse (Kv2Group12) attention has no register tile yet.
-  const bool registerTile = tile == AttentionTile::Register && kernel != KernelLayout::Kv2Group12;
+  const bool registerTile = tile == AttentionTile::Register;
   return {lanes, laneSplits, splits,
           verifyWorkspaceBound(lanes, queryHeads, layout),
           registerTile
               ? bf16 ? pipeline(kernel, "verify_attention_bf16_split_sgf",
-                                "verify_attention_bf16_split_sgf_kv2_g8", {})
+                                "verify_attention_bf16_split_sgf_kv2_g8",
+                                "verify_attention_bf16_sparse_sgf_kv2_g12")
                      : pipeline(kernel, "verify_attention_q8_split_sgf",
-                                "verify_attention_q8_split_sgf_kv2_g8", {})
+                                "verify_attention_q8_split_sgf_kv2_g8",
+                                "verify_attention_q8_sparse_sgf_kv2_g12")
           : bf16 ? pipeline(kernel, "verify_attention_bf16_split",
                             "verify_attention_bf16_split_kv2_g8",
                             "verify_attention_bf16_sparse_kv2_g12")
@@ -251,13 +253,15 @@ VerifyAttentionPlan PagedAttention::verifyPlan(
           // on most grids of more than 32 splits.
           layout.valuesTokenMajor ? metal::DispatchSize{layout.kvHeads * splits, 1, lanes}
                                   : metal::DispatchSize{layout.kvHeads, splits, lanes},
-          splitThreads(registerTile ? AttentionTile::Register : AttentionTile::Mpp, queryHeads, layout),
+          splitThreads(tile, queryHeads, layout),
           {layout.kvHeads,
            kv::kVerifyRows * (queryHeads / layout.kvHeads), lanes},
           layout.valuesTokenMajor,
           pipeline(kernel, {}, {},
-                   layout.format == kv::Format::BFloat16 ? "verify_attention_bf16_sparse_located_kv2_g12"
-                                                         : "verify_attention_q8_sparse_located_kv2_g12"),
+                   registerTile ? bf16 ? "verify_attention_bf16_sparse_located_sgf_kv2_g12"
+                                       : "verify_attention_q8_sparse_located_sgf_kv2_g12"
+                   : bf16       ? "verify_attention_bf16_sparse_located_kv2_g12"
+                                : "verify_attention_q8_sparse_located_kv2_g12"),
           storePipeline(layout, true),
           {uint64_t{lanes} * 2 * kv::kVerifyRows * layout.kvHeads, 1, 1},
           {layout.headDimension, 1, 1}, layout, queryHeads};

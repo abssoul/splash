@@ -112,6 +112,9 @@ template <> struct ValueRun<int8_t> {
   void load(device const int8_t *values) {
     words = *reinterpret_cast<device const uint2 *>(values);
   }
+  void load(threadgroup const int8_t *values) {
+    words = *reinterpret_cast<threadgroup const uint2 *>(values);
+  }
   half2 step(uint s) const {
     return int8_pair((s < 2 ? words.x : words.y) >> (8 * (s & 1)));
   }
@@ -120,6 +123,9 @@ template <> struct ValueRun<bfloat> {
   uint4 words;
   void load(device const bfloat *values) {
     words = *reinterpret_cast<device const uint4 *>(values);
+  }
+  void load(threadgroup const bfloat *values) {
+    words = *reinterpret_cast<threadgroup const uint4 *>(values);
   }
   float2 step(uint s) const {
     return s < 2 ? bfloat_halves(words.x, words.y, s & 1)
