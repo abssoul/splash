@@ -350,7 +350,16 @@ inline void decode(device const TableElem<F32> *table, device const float *sums,
 #pragma unroll
     for (uint i = 0; i < I; ++i) {
       const uint e = lane + 32 * i;
-      if (e < NC * S::J / JS) cu[JS * (e / NC) * NC + e % NC] = coefficient<F>(src[i], u, JS * (e / NC));
+      if (e < NC * S::J / JS) {
+        C k = coefficient<F>(src[i], u, JS * (e / NC));
+        // The F32 per-32 nibble chains' epilogue factors, 64 s and m - 64 s (code = 64 (operand - 1)), once per
+        // coefficient rather than per chain: on an M2 Max, 1-2% off Q4_K's, Q4_0's and Q5_K's 27B projections at one to
+        // three lanes (Q4_K and Q4_0 0.3% more at four).
+        if constexpr (F32 && NibbleChunk<F>::value) k = float2(64 * k.x, fma(64.0f, k.x, k.y));
+        // The centered chains' Scale s.
+        if constexpr (F32 && CenteredChunk<F>::value) k = CenteredChunk<F>::Scale * k;
+        cu[JS * (e / NC) * NC + e % NC] = k;
+      }
     }
     simdgroup_barrier(mem_flags::mem_threadgroup);
 #pragma unroll
@@ -450,15 +459,15 @@ inline void decode(device const TableElem<F32> *table, device const float *sums,
               for (uint f = h * FG; f < (h + 1) * FG; ++f)
                 sgmatrix::mma_mixed(dot, a[nf][f], b[f]);
               if constexpr (nibbles) {
-                // code = 64 (operand - 1): s code + m = 64 s operand + m - 64 s, cs.y being m - 128 s.
-                acc[r][nf] = fma(dot, 64 * cs[h][nf].x, acc[r][nf]);
-                acc[r][nf] = fma(sum, fma(64.0f, cs[h][nf].x, cs[h][nf].y), acc[r][nf]);
+                // code = 64 (operand - 1): s code + m = 64 s operand + m - 64 s.
+                acc[r][nf] = fma(dot, cs[h][nf].x, acc[r][nf]);
+                acc[r][nf] = fma(sum, cs[h][nf].y, acc[r][nf]);
               } else if constexpr (S::HasMin) {
                 acc[r][nf] = fma(dot, cs[h][nf].x, acc[r][nf]);
                 acc[r][nf] = fma(S::Seeded ? seed[h] : sum, cs[h][nf].y, acc[r][nf]);
               } else if constexpr (centered) {
-                // code - zero = Scale operand.
-                acc[r][nf] = fma(dot, CenteredChunk<F>::Scale * float(cs[h][nf]), acc[r][nf]);
+                // code - zero = Scale operand, the coefficient being Scale s.
+                acc[r][nf] = fma(dot, float(cs[h][nf]), acc[r][nf]);
               } else {
                 acc[r][nf] = fma(dot, float(cs[h][nf]), acc[r][nf]);
               }
