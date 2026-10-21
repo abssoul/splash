@@ -133,6 +133,25 @@ inline half2 nibble_operand(uint word, uint f) {
   const uint at = f == 0 ? word << 4 : f == 1 ? word : word >> (4 * (f - 1));
   return as_type<half2>((at & 0x00F000F0u) | 0x3C003C00u);
 }
+// The same of a 5-bit chunk in Q5_K's planes, its fifth bits (pair p's at bits 2p and 16 + 2p) at bit 8 of each
+// halfword: 1 + code / 64, exact for codes to 31, where operand_f32 shifts them below the nibble and subtracts. On
+// an M2 Max this takes 4-5% off the 27B's Q5_K projections at one lane (1-2.5% at two to four), and the 27B in
+// UD-Q4_K_XL and UD-Q5_K_M, 45% Q5_K, decodes 1.8-2.2% faster at one lane.
+inline half2 nibble_operand(uint2 chunk, uint f) {
+  const uint at = f == 0 ? chunk.x << 4 : f == 1 ? chunk.x : chunk.x >> (4 * (f - 1));
+  return as_type<half2>((at & 0x00F000F0u) | ((chunk.y << (8 - 2 * f)) & 0x01000100u) | 0x3C003C00u);
+}
+
+// The exact half operand (code - 32) / 64 of pair f of a Q6_K chunk (uint2: the 4-bit word, then the high bits as
+// quant_spread2 places them, pair p's at bits 4p and 16 + 4p): the high bits at bits 8-9 of each halfword above the
+// nibble, 1 + code / 64, less 1.5, so a chain of Q6_K's zero point 32 needs no seed. On an M2 Max this takes 3-4%
+// off the 27B's Q6_K projections at one lane and 6-18% at two to four, and the 27B in UD-Q6_K_M, 60% Q6_K, decodes
+// 1.4%, 5.3% and 5.7% faster at one, two and four lanes.
+inline half2 nibble6_operand(uint2 chunk, uint f) {
+  const uint at = f == 0 ? chunk.x << 4 : f == 1 ? chunk.x : chunk.x >> (4 * (f - 1));
+  const uint high = f == 3 ? chunk.y >> 4 : chunk.y << (8 - 4 * f);
+  return as_type<half2>((at & 0x00F000F0u) | (high & 0x03000300u) | 0x3C003C00u) - half2(1.5h);
+}
 
 // Apple7/8's (F32) view of Q4_0 and Q5_0: the zero point taken as a min, m = -zero d, so their chains close once per
 // 32 inputs against the table's sums, as Q4_1's and Q5_1's do, instead of once per 16 against the seeds. On an M2
@@ -160,12 +179,19 @@ template <class F> struct F32Format { typedef F type; };
 template <> struct F32Format<FmtQ40> { typedef ZeroAsMin<FmtQ40> type; };
 template <> struct F32Format<FmtQ50> { typedef ZeroAsMin<FmtQ50> type; };
 // Formats with a min per 32 inputs whose chunk is one word of 4-bit codes in Q4_K's order (Q4_K, Q4_1, Q4_0 as
-// ZeroAsMin, MLX affine 4-bit in groups of 32): their F32 chains per 32 inputs take nibble_operand too.
+// ZeroAsMin, MLX affine 4-bit in groups of 32), or 5-bit codes in Q5_K's planes (Q5_K, Q5_1, Q5_0 as ZeroAsMin):
+// their F32 chains per 32 inputs take nibble_operand too.
 template <class F> struct NibbleChunk { static constexpr constant bool value = false; };
 template <> struct NibbleChunk<FmtQ4K> { static constexpr constant bool value = true; };
 template <> struct NibbleChunk<FmtQ41> { static constexpr constant bool value = true; };
 template <> struct NibbleChunk<ZeroAsMin<FmtQ40>> { static constexpr constant bool value = true; };
 template <> struct NibbleChunk<FmtAffine<4, 1>> { static constexpr constant bool value = true; };
+template <> struct NibbleChunk<FmtQ5K> { static constexpr constant bool value = true; };
+template <> struct NibbleChunk<FmtQ51> { static constexpr constant bool value = true; };
+template <> struct NibbleChunk<ZeroAsMin<FmtQ50>> { static constexpr constant bool value = true; };
+// Q6_K, whose F32 chains per 16 inputs take nibble6_operand, unseeded.
+template <class F> struct CenteredChunk { static constexpr constant bool value = false; };
+template <> struct CenteredChunk<FmtQ6K> { static constexpr constant bool value = true; };
 
 // The exact bf16 operand of pair f of a chunk.
 template <class F>
@@ -294,18 +320,22 @@ inline void decode(device const TableElem<F32> *table, device const float *sums,
     // once. Every source load is issued before the first decode waits for one,
     // which takes 1-8% off the zero-point formats (16 coefficients per column
     // and unit) at one to four lanes on the 40-core M3 Max.
-    constexpr uint I = (NC * S::J + 31) / 32;
+    // The F32 span chains read one coefficient per span, every other one of the unit's, and decode those alone: on an
+    // M2 Max, 2.4-2.8% off MLX 4-bit's 27B projections at one lane and 0.7-1.6% at two to four.
+    constexpr uint JS = F32 && S::SpanChain ? 2 : 1;
+    constexpr uint I = (NC * S::J / JS + 31) / 32;
     CoefSource<F> src[I];
 #pragma unroll
     for (uint i = 0; i < I; ++i) {
       const uint e = lane + 32 * i;
-      if (e < NC * S::J) src[i] = coefficient_source<F>(w0, w1, meta, plane_tile, groups, plane_row + e % NC, u, e / NC);
+      if (e < NC * S::J / JS)
+        src[i] = coefficient_source<F>(w0, w1, meta, plane_tile, groups, plane_row + e % NC, u, JS * (e / NC));
     }
     simdgroup_barrier(mem_flags::mem_threadgroup);
 #pragma unroll
     for (uint i = 0; i < I; ++i) {
       const uint e = lane + 32 * i;
-      if (e < NC * S::J) cu[e] = coefficient<F>(src[i], u, e / NC);
+      if (e < NC * S::J / JS) cu[JS * (e / NC) * NC + e % NC] = coefficient<F>(src[i], u, JS * (e / NC));
     }
     simdgroup_barrier(mem_flags::mem_threadgroup);
 #pragma unroll
@@ -368,6 +398,8 @@ inline void decode(device const TableElem<F32> *table, device const float *sums,
       for (uint q = 0; q < 2; ++q) {
         constexpr bool nibbles = F32 && NibbleChunk<F>::value;
         static_assert(!nibbles || (S::HasMin && !S::Seeded && !S::Wide), "nibble chains close against a min");
+        constexpr bool centered = F32 && CenteredChunk<F>::value;
+        static_assert(!centered || (!S::HasMin && S::Seeded), "centered chains take a zero point");
         vec<OperandType<F, F32>, 2> a[2][4];
         C cs[S::CG][2];
 #pragma unroll
@@ -375,6 +407,7 @@ inline void decode(device const TableElem<F32> *table, device const float *sums,
 #pragma unroll
           for (uint f = 0; f < 4; ++f) {
             if constexpr (nibbles) a[nf][f] = nibble_operand(cur[nf][q], f);
+            else if constexpr (centered) a[nf][f] = nibble6_operand(cur[nf][q], f);
             else if constexpr (F32) a[nf][f] = operand_f32<F>(cur[nf][q], f, lut);
             else a[nf][f] = operand<F>(cur[nf][q], f, lut);
           }
@@ -391,7 +424,7 @@ inline void decode(device const TableElem<F32> *table, device const float *sums,
           if (S::HasMin && !S::Seeded) sum = *(device const float2 *)(s32 + ulong(r) * tileSums + q * 8 + fn);
 #pragma unroll
           for (uint h = 0; h < S::CG; ++h)
-            seed[h] = S::Seeded ? *(device const float2 *)(seeds + ulong(r) * tileSums + (2 * q + h) * 8 + fn)
+            seed[h] = S::Seeded && !centered ? *(device const float2 *)(seeds + ulong(r) * tileSums + (2 * q + h) * 8 + fn)
                                 : float2(0);
 #pragma unroll
           for (uint h = 0; h < S::CG; ++h) {
@@ -408,6 +441,9 @@ inline void decode(device const TableElem<F32> *table, device const float *sums,
               } else if constexpr (S::HasMin) {
                 acc[r][nf] = fma(dot, cs[h][nf].x, acc[r][nf]);
                 acc[r][nf] = fma(S::Seeded ? seed[h] : sum, cs[h][nf].y, acc[r][nf]);
+              } else if constexpr (centered) {
+                // code - 32 = 64 operand.
+                acc[r][nf] = fma(dot, 64 * float(cs[h][nf]), acc[r][nf]);
               } else {
                 acc[r][nf] = fma(dot, float(cs[h][nf]), acc[r][nf]);
               }
