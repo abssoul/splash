@@ -13,13 +13,14 @@ kernel void moe_expert_gguf_mma(device bfloat *input [[buffer(0)]], device const
                                 device uchar *w1 [[buffer(4)]], device uchar *meta [[buffer(5)]], device uchar *sw0 [[buffer(6)]],
                                 device uchar *sw1 [[buffer(7)]], device uchar *smeta [[buffer(8)]],
                                 device bfloat *output [[buffer(9)]], device bfloat *aux [[buffer(10)]],
-                                constant MoeGgufExpertParams &p [[buffer(11)]], uint2 group [[threadgroup_position_in_grid]],
+                                device const uint *slots [[buffer(11)]], constant MoeGgufExpertParams &p [[buffer(12)]],
+                                uint2 group [[threadgroup_position_in_grid]],
                                 uint simd_lane [[thread_index_in_simdgroup]], uint simd_group [[simdgroup_index_in_threadgroup]]) {
   threadgroup half stage[GGUF_TILE_COLUMNS * kStride];
   threadgroup half2 tl[kQuantPairTableEntries];
   if (group.y >= *tile_count) return;
   const MoeTileDescriptor tile = tiles[group.y];
-  const MoeGgufSegment s = moe_gguf_segment(tile.expert, p, w0, w1, meta, sw0, sw1, smeta);
+  const MoeGgufSegment s = moe_gguf_segment(tile.expert, p, slots, w0, w1, meta, sw0, sw1, smeta);
   device bfloat *x = input + ulong(group.y) * Rows * p.input_size;
   const ulong out = ulong(group.y) * Rows * p.output_size;
   const uint origin = group.x * GGUF_TILE_COLUMNS + simd_group * kColumns, thread_index = simd_group * 32 + simd_lane;
@@ -42,7 +43,8 @@ kernel void moe_expert_gguf_mma(device bfloat *input [[buffer(0)]], device const
 }
 using MoeExpertGgufMmaKernel = void(device bfloat *, device const MoeTileDescriptor *, device const uint *, device uchar *,
                                     device uchar *, device uchar *, device uchar *, device uchar *, device uchar *,
-                                    device bfloat *, device bfloat *, constant MoeGgufExpertParams &, uint2, uint, uint);
+                                    device bfloat *, device bfloat *, device const uint *, constant MoeGgufExpertParams &,
+                                    uint2, uint, uint);
 template [[host_name("moe_expert_gguf_mma_m8_a")]] kernel MoeExpertGgufMmaKernel moe_expert_gguf_mma<8, EpNone>;
 template [[host_name("moe_expert_gguf_mma_m8_g")]] kernel MoeExpertGgufMmaKernel moe_expert_gguf_mma<8, EpUpWithGate>;
 template [[host_name("moe_expert_gguf_mma_m32_a")]] kernel MoeExpertGgufMmaKernel moe_expert_gguf_mma<32, EpNone>;

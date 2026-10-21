@@ -157,7 +157,8 @@ void printUsage(std::string_view executable) {
       " [--max-image-patches PATCHES] [--persistent-cache on|off] [--cache-dir DIRECTORY]"
       " [--max-cache-disk-writes BYTES]"
       " [--idle-release SECONDS|off] [--idle-sleep prevent|allow] [--ane on|off]"
-      " [--relaunch-context TOKENS]"
+      " [--relaunch-context TOKENS] [--ple-memory BYTES] [--expert-memory BYTES]"
+      " [--verify-rows auto|all]"
       " [--prefill-mode bounded|full] [--prefill-bound-ms MILLISECONDS]"
       " [--prefill-bound-scope buffer|command]");
   writeStderrLine("       " + command + " model-check mlx-affine none|safetensors CONFIG [DRAFT_CONFIG]");
@@ -215,6 +216,11 @@ bootstrapConfig(const engine::NativeArguments &arguments) {
           ? engine::AneFfnSetting::fromGiven(arguments.aneFfnShare, arguments.aneFfnMinimumRows)
           : engine::AneFfnSetting{.enabled = false};
   config.resources.relaunchContext = arguments.relaunchContext;
+  config.resources.pleMemory = arguments.pleMemory;
+  config.resources.expertMemory = arguments.expertMemory;
+  config.resources.sparseKvMemory = arguments.sparseKvMemory;
+  config.resources.kvSpillAlways = arguments.kvSpillAlways;
+  config.resources.verifyRows = arguments.verifyRows;
   config.nativeLoop.engine.maxContext = arguments.maxContext;
   config.nativeLoop.engine.decodeShare = arguments.decodeShare;
   config.nativeLoop.engine.prefillCommandMilliseconds = arguments.prefillCommandMilliseconds;
