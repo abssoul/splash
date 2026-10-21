@@ -317,18 +317,22 @@ inline void decode(device const TableElem<F32> *table, device const float *sums,
     // once. Every source load is issued before the first decode waits for one,
     // which takes 1-8% off the zero-point formats (16 coefficients per column
     // and unit) at one to four lanes on the 40-core M3 Max.
-    constexpr uint I = (NC * S::J + 31) / 32;
+    // The F32 span chains read one coefficient per span, every other one of the unit's, and decode those alone: on an
+    // M2 Max, 2.4-2.8% off MLX 4-bit's 27B projections at one lane and 0.7-1.6% at two to four.
+    constexpr uint JS = F32 && S::SpanChain ? 2 : 1;
+    constexpr uint I = (NC * S::J / JS + 31) / 32;
     CoefSource<F> src[I];
 #pragma unroll
     for (uint i = 0; i < I; ++i) {
       const uint e = lane + 32 * i;
-      if (e < NC * S::J) src[i] = coefficient_source<F>(w0, w1, meta, plane_tile, groups, plane_row + e % NC, u, e / NC);
+      if (e < NC * S::J / JS)
+        src[i] = coefficient_source<F>(w0, w1, meta, plane_tile, groups, plane_row + e % NC, u, JS * (e / NC));
     }
     simdgroup_barrier(mem_flags::mem_threadgroup);
 #pragma unroll
     for (uint i = 0; i < I; ++i) {
       const uint e = lane + 32 * i;
-      if (e < NC * S::J) cu[e] = coefficient<F>(src[i], u, e / NC);
+      if (e < NC * S::J / JS) cu[JS * (e / NC) * NC + e % NC] = coefficient<F>(src[i], u, JS * (e / NC));
     }
     simdgroup_barrier(mem_flags::mem_threadgroup);
 #pragma unroll
