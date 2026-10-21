@@ -92,6 +92,7 @@ PAGED_PREFILL_SPLIT(prefill_attention_bf16_split_kv2_g8, 2, 8, bfloat)
       uint3 group [[threadgroup_position_in_grid]],                            \
       uint sg [[simdgroup_index_in_threadgroup]],                              \
       uint lane [[thread_index_in_simdgroup]]) {                               \
+    threadgroup uint query_stage[Group * 32 * 32];                             \
     constexpr uint D = SplashKvHeadDimension;                                  \
     const uint kv_head = group.x, tile = group.y, split = group.z;             \
     const uint tile_start = tile * SplashPrefillTileRows;                      \
@@ -108,7 +109,7 @@ PAGED_PREFILL_SPLIT(prefill_attention_bf16_split_kv2_g8, 2, 8, bfloat)
     q8sgf::tile<Heads, Group, CacheElement>(                                   \
         queries + tile_offset, page_table, params.kv, kv_head,                 \
         params.committed_tokens + tile_start, active_rows, params.split_count, \
-        split, partials, statistics, slot, sg, lane);                          \
+        split, partials, statistics, slot, sg, lane, query_stage);                          \
   }
 
 SGF_PREFILL_SPLIT(prefill_attention_q8_split_sgf, 4, 6, int8_t)
