@@ -92,10 +92,14 @@ inline void hyper_norm_quarter_row(device const float *streams, device const flo
   const uint q = thread_id / kRowThreads, tid = thread_id % kRowThreads;
   const uint width = kStreams * kNormHidden;
   device const float *x = streams + ulong(row) * width;
-  float mine[kNormValues];
-  for (uint i = 0; i < kNormValues; ++i) mine[i] = x[q * kNormHidden + tid + i * kRowThreads];
+  // Values are read again where they are used rather than held across the
+  // barriers: held, they cap the kernel below its threads on Apple7/8 (896 on
+  // an M1 Max). The arithmetic and its order are unchanged.
   float sum = 0.0f;
-  for (uint i = 0; i < kNormValues; ++i) sum += mine[i] * mine[i];
+  for (uint i = 0; i < kNormValues; ++i) {
+    const float value = x[q * kNormHidden + tid + i * kRowThreads];
+    sum += value * value;
+  }
   // The threadgroup's simdgroup `simdgroup` is quarter q's simdgroup
   // simdgroup % kSimdgroups.
   sum = simd_sum(sum);
@@ -112,24 +116,17 @@ inline void hyper_norm_quarter_row(device const float *streams, device const flo
   if (!p.inject) {
     for (uint i = 0; i < kNormValues; ++i) {
       const uint c = q * kNormHidden + tid + i * kRowThreads;
-      out[c] = bfloat(mine[i] * scales[q] * norm[c]);
+      out[c] = bfloat(x[c] * scales[q] * norm[c]);
     }
   } else {
     device const float *w = inject + ulong(q) * width;
     for (uint s = 0; s < kStreams; ++s) {
       const float scale = scales[s];
-      float xv[kNormValues], ns[kNormValues], ws[kNormValues];
       for (uint i = 0; i < kNormValues; ++i) {
         const uint c = s * kNormHidden + tid + i * kRowThreads;
-        xv[i] = x[c];
-        ns[i] = norm[c];
-        ws[i] = w[c];
-      }
-      for (uint i = 0; i < kNormValues; ++i) {
-        const uint c = s * kNormHidden + tid + i * kRowThreads;
-        const float v = xv[i] * scale * ns[i];
+        const float v = x[c] * scale * norm[c];
         if (s == q) out[c] = bfloat(v);
-        dot += ws[i] * v;
+        dot += w[c] * v;
       }
     }
   }
