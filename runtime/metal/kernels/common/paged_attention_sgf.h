@@ -135,7 +135,7 @@ __attribute__((always_inline)) inline void tile(
     device const bfloat *tile_queries, device const SplashKvPage *page_table,
     SplashKvLayer kv, uint kv_head, uint committed_tokens, uint active_rows, uint splits,
     uint split, device float *partials, device float *statistics, ulong slot,
-    uint sg, uint lane) {
+    uint sg, uint lane, threadgroup uint *query_stage) {
   constexpr bool Quantized = is_same<CacheElement, int8_t>::value;
   constexpr uint G = QueryHeadsPerKVHead;
   constexpr uint Rows = 8;
@@ -161,8 +161,10 @@ __attribute__((always_inline)) inline void tile(
       min(visible, committed_tokens + min(row / G, active_rows - 1) + 1),
       min(visible, committed_tokens + min((row + 1) / G, active_rows - 1) + 1));
 
-  // Q^T fragments for all 32 QK steps, bfloat pairs (row, row + 1).
-  uint queries[4][8];
+  // Q^T fragments for all 32 QK steps, bfloat pairs (row, row + 1), staged
+  // in this lane's own threadgroup words (step-major, so lanes never share a
+  // bank) to keep them out of registers.
+  threadgroup uint *queries = query_stage + sg * 32 * 32;
   {
     device const ushort *q0 =
         reinterpret_cast<device const ushort *>(tile_queries) + row * D;
@@ -172,7 +174,7 @@ __attribute__((always_inline)) inline void tile(
 #pragma unroll
       for (uint t = 0; t < 8; ++t) {
         const uint d = 64 * b + block_dimension(fm, t);
-        queries[b][t] = uint(q0[d]) | (uint(q1[d]) << 16);
+        queries[(b * 8 + t) * 32 + lane] = uint(q0[d]) | (uint(q1[d]) << 16);
       }
   }
   // O^T tiles: dimension 8 d + fm of rows (row, row + 1).
@@ -217,7 +219,7 @@ __attribute__((always_inline)) inline void tile(
         run.load(keys + page_token(fm, s) * D + 64 * b + 8 * fn);
 #pragma unroll
         for (uint t = 0; t < 8; ++t)
-          mma(scores[s], run.step(t), bfloat_pair(queries[b][t]));
+          mma(scores[s], run.step(t), bfloat_pair(queries[(b * 8 + t) * 32 + lane]));
       }
 
     // Online softmax, as splash_attention_page_softmax: key scale, then
