@@ -331,7 +331,7 @@ void encodeAttentionPieces(id<MTLComputeCommandEncoder> encoder,
         rows, kQueryHeads, {1, kKvHeads, kHeadDimension});
     const PrefillAttentionParams params{
         data.params.committed_tokens + begin, rows, data.params.chunk_stride,
-        data.params.page_table_entries, data.params.kv, plan.splits};
+        data.params.page_table_entries, data.params.kv, plan.splits, 0, 0};
     [encoder setComputePipelineState:pipelines.split];
     [encoder setBuffer:data.queries offset:begin * rowBytes atIndex:0];
     [encoder setBuffer:data.partials offset:0 atIndex:1];
