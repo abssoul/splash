@@ -24,6 +24,7 @@
 #include "DispatchReplay.hpp"
 #include "metal/CommandGraph.hpp"
 #include "metal/MetalBackend.hpp"
+#include "ops/ExecutionPlans.hpp"
 #include "ops/PagedAttention.hpp"
 
 #include <algorithm>
@@ -82,17 +83,17 @@ AttentionFixturePlan casePlan(AttentionShape shape, bool prefill, uint32_t lanes
                                     histories, scratch, {kLayer + 1, kLayer, extentPages});
 }
 
-// The store and attention graph the runtime encodes for a case.
-metal::CommandGraph caseGraph(const AttentionFixture &fixture, bool prefill) {
+// The store and attention graph the runtime encodes for a case on the
+// device's plans (its attention tile).
+metal::CommandGraph caseGraph(const AttentionFixture &fixture, const ops::ExecutionPlans &plans,
+                              bool prefill) {
   const AttentionFixturePlan &plan = fixture.plan();
   metal::CommandGraph graph;
   if (prefill)
-    fixture.addGraph(graph, PagedAttention::prefillPlan(plan.rows, plan.shape.queryHeads,
-                                                        plan.layout()));
+    fixture.addGraph(graph, plans.prefillAttention(plan.rows, plan.shape.queryHeads, plan.layout()));
   else
-    fixture.addGraph(graph, PagedAttention::verifyPlan(
-                                plan.lanes, plan.shape.queryHeads, plan.layout(),
-                                std::span(plan.histories).first(plan.lanes)));
+    fixture.addGraph(graph, plans.verifyAttention(plan.lanes, plan.shape.queryHeads, plan.layout(),
+                                                  std::span(plan.histories).first(plan.lanes)));
   return graph;
 }
 
@@ -142,7 +143,8 @@ std::vector<Case> measure(std::span<metal::MetalBackend *> backends,
     fixtures.push_back(
         std::make_unique<AttentionFixture>(*backends[i], plan, "attention-sweep-fixture"));
     fixtures.back()->fill();
-    graphs.push_back(caseGraph(*fixtures.back(), prefill));
+    const ops::ExecutionPlans plans(backends[i]->capabilities());
+    graphs.push_back(caseGraph(*fixtures.back(), plans, prefill));
     results[i].kvBytes = historyBytes(plan);
   }
   // Warm every variant, then alternate order to limit clock/thermal drift.
