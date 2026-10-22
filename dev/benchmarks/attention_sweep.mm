@@ -52,6 +52,7 @@
 #include "metal/abi/BlockIndexer.h"
 #include "metal/abi/RoPE.h"
 #include "ops/BlockIndexer.hpp"
+#include "ops/ExecutionPlans.hpp"
 #include "ops/PagedAttention.hpp"
 
 #include <algorithm>
@@ -366,10 +367,11 @@ double listEntries(const QsaBlocks &qsa) {
   return std::accumulate(counts, counts + qsa.lists, 0.0) / qsa.lists;
 }
 
-// The store and attention graph the runtime encodes for a case, after its
-// block lists when it has QSA bitmaps, and the indexer that selects them
-// with --qsa indexer.
-metal::CommandGraph caseGraph(const AttentionFixture &fixture, bool prefill, const QsaBlocks &qsa) {
+// The store and attention graph the runtime encodes for a case on the
+// device's plans (its attention tile), after its block lists when it has QSA
+// bitmaps, and the indexer that selects them with --qsa indexer.
+metal::CommandGraph caseGraph(const AttentionFixture &fixture, const ops::ExecutionPlans &plans, bool prefill,
+                              const QsaBlocks &qsa) {
   const AttentionFixturePlan &plan = fixture.plan();
   metal::CommandGraph graph;
   if (const QsaIndexer *indexer = qsa.indexer ? &*qsa.indexer : nullptr) {
@@ -389,13 +391,11 @@ metal::CommandGraph caseGraph(const AttentionFixture &fixture, bool prefill, con
     PagedAttention::addBlockLists(graph, qsa.bitmaps, qsa.words, sequences, qsa.blocks);
   }
   if (prefill)
-    fixture.addGraph(graph,
-                     PagedAttention::prefillPlan(plan.rows, plan.shape.queryHeads, plan.layout()),
-                     qsa.blocks);
+    fixture.addGraph(graph, plans.prefillAttention(plan.rows, plan.shape.queryHeads, plan.layout()), qsa.blocks);
   else
     fixture.addGraph(graph,
-                     PagedAttention::verifyPlan(plan.lanes, plan.shape.queryHeads, plan.layout(),
-                                                std::span(plan.histories).first(plan.lanes)),
+                     plans.verifyAttention(plan.lanes, plan.shape.queryHeads, plan.layout(),
+                                           std::span(plan.histories).first(plan.lanes)),
                      qsa.blocks);
   return graph;
 }
@@ -456,12 +456,13 @@ std::vector<Case> measure(std::span<metal::MetalBackend *> backends,
         std::make_unique<AttentionFixture>(*backends[i], plan, "attention-sweep-fixture"));
     fixtures.back()->fill();
     blocks.push_back(qsaBlocks(*backends[i], plan, prefill, bitmaps, words, qsa == "indexer", located));
-    graphs.push_back(caseGraph(*fixtures.back(), prefill, blocks.back()));
+    const ops::ExecutionPlans plans(backends[i]->capabilities());
+    graphs.push_back(caseGraph(*fixtures.back(), plans, prefill, blocks.back()));
     if (located) {
       (void)backends[i]->submitCommandAsync(graphs.back().dispatches()).wait();
       const uint64_t paged = outputDigest(*fixtures.back());
       locate(*backends[i], *fixtures.back(), blocks.back());
-      graphs.back() = caseGraph(*fixtures.back(), prefill, blocks.back());
+      graphs.back() = caseGraph(*fixtures.back(), plans, prefill, blocks.back());
       (void)backends[i]->submitCommandAsync(graphs.back().dispatches()).wait();
       if (outputDigest(*fixtures.back()) != paged)
         throw std::runtime_error("the located verify split changed attention output bits");
