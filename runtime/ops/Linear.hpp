@@ -92,7 +92,9 @@ struct LinearConfig final {
   bool spread = false;
   // GgufStaged gate/up decode: gate and up in one dispatch whose simdgroups
   // each stage both tensors' 32 columns (gguf_decode_<format>_m<rows>_gate_up,
-  // gate and up in one format), instead of a gate pass and an up pass.
+  // gate and up in one format), instead of a gate pass and an up pass. With
+  // fp32Table (Apple7/8's register tile): one dispatch of both tensors' K
+  // partitions (gguf_decode_sgf_<format>_l<lanes>_gu).
   bool oneGateUpPass = false;
   // GgufRegister on Apple7/8: the F32 instances read Table16F, whose fp32
   // values enter their MMA without the widening a bf16 table costs.

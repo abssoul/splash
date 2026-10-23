@@ -133,7 +133,8 @@ int main(int argc, char **argv) {
       }
       for (uint32_t lanes = 1; lanes <= kMaximumLanes && !prefill; ++lanes) {
         const LinearWorkload w{{N, K}, lanes * kLaneRows, LinearPhase::Decode, epilogue};
-        const LinearConfig policy = linear.plan(w, ring.front()).configuration();
+        const LinearConfig policy =
+            linear.plan(w, ring.front(), epilogue == LinearEpilogue::GateUp ? &ring.front() : nullptr).configuration();
         for (const LinearTile tile : {LinearTile::GgufRegister, LinearTile::GgufStaged})
           for (uint32_t splits = 1; splits <= LinearConfig::kMaximumSplits; splits *= 2) {
             const bool registerTile = tile == LinearTile::GgufRegister;
@@ -142,12 +143,19 @@ int main(int argc, char **argv) {
                                              [](const Image &i) { return quant_register_format(i.format); }))
               continue;
             if (registerTile ? K / 256 < splits : (K / 32) % splits) continue;
-            // Apple7/8's register tile reads an fp32 table.
-            const LinearConfig config{.tile = tile, .splits = splits, .spread = !registerTile && policy.spread,
-                                      .fp32Table = registerTile && backend.capabilities().appleGpuFamily < 9};
-            cases.push_back({"L" + std::to_string(lanes),
-                             std::string(registerTile ? "register" : "staged") + " S" + std::to_string(splits),
-                             Linear::plan(w, config, FloatOutput::BFloat16), config == policy, {}});
+            const bool canOnePass = registerTile && policy.oneGateUpPass;
+            const std::vector<bool> onePassChoices =
+                canOnePass ? std::vector<bool>{false, true} : std::vector<bool>{false};
+            for (const bool onePass : onePassChoices) {
+              // Apple7/8's register tile reads an fp32 table.
+              const LinearConfig config{.tile = tile, .splits = splits, .spread = !registerTile && policy.spread,
+                                        .oneGateUpPass = onePass,
+                                        .fp32Table = registerTile && backend.capabilities().appleGpuFamily < 9};
+              const std::string name = std::string(registerTile ? (onePass ? "register_gu" : "register") : "staged") +
+                                       " S" + std::to_string(splits);
+              cases.push_back({"L" + std::to_string(lanes), name,
+                               Linear::plan(w, config, FloatOutput::BFloat16), config == policy, {}});
+            }
           }
       }
       // Buffers of the widest plan; the scratch of the plan that needs the most.
