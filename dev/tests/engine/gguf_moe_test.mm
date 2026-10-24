@@ -677,8 +677,10 @@ MoeRun runPlan(MetalBackend &backend, const Model &m, Buffers &b, const MoePlan 
     gateUpPasses += dispatch.pipelineName.ends_with("_gate_up") || dispatch.pipelineName.ends_with("_gate_up_mixed");
     upPasses += dispatch.pipelineName.ends_with("_g");
   }
-  require(gateUpPasses == staged && upPasses == !staged,
-          label + (staged ? ": gate and up run in two passes" : ": gate and up run in one pass"));
+  // Only the staged tile fuses gate and up; Apple7/8's MMA tile runs two passes like the register tile.
+  const bool oneGateUp = plan.configuration().ggufTile == MoeGgufTile::Staged;
+  require(gateUpPasses == oneGateUp && upPasses == !oneGateUp,
+          label + (oneGateUp ? ": gate and up run in two passes" : ": gate and up run in one pass"));
   for (uint32_t r = 0; r < rows; ++r) {
     const float *x = b.input.data() + uint64_t{r} * kHidden;
     // Routes: the fp64 top-k by descending score, ascending id; the GPU's fp32
@@ -940,14 +942,14 @@ int moe(MetalBackend &backend) {
           const std::string label = formats + (tile == MoeGgufTile::Register ? " register" : " staged") + " decode B" +
                                     std::to_string(lanes);
           const MoeRun run =
-              runPlan(backend, m, b, plan, tile == MoeGgufTile::Staged, products, stats, label);
+              runPlan(backend, m, b, plan, tile != MoeGgufTile::Register, products, stats, label);
           // A row's result depends on its own routes and the tile kinds they
           // run only, not on the rows it is batched with (the tile rows of one
           // expert are independent).
           if (widest.output.empty()) {
             Stats repeat;
             failures += compareRepeat(
-                run, runPlan(backend, m, b, plan, tile == MoeGgufTile::Staged, products, repeat, label + " repeat"),
+                run, runPlan(backend, m, b, plan, tile != MoeGgufTile::Register, products, repeat, label + " repeat"),
                 label);
             widest = run;
           } else {
@@ -961,7 +963,7 @@ int moe(MetalBackend &backend) {
               MoeConfig{.expertTile = MoeExpertTile::M8, .ggufTile = tile});
           const std::string label = formats + (tile == MoeGgufTile::Register ? " register" : " staged") + " prefill rows=" +
                                     std::to_string(chunk);
-          compareWidest(runPlan(backend, m, b, plan, tile == MoeGgufTile::Staged, products, stats, label),
+          compareWidest(runPlan(backend, m, b, plan, tile != MoeGgufTile::Register, products, stats, label),
                         label);
         }
         printf("%-20s %s decode B1-4, prefill 263/27/9/8: gate/up %.2f%% and down %.2f%% of outputs differ from bf16(fp64), "
