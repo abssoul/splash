@@ -158,7 +158,7 @@ kernel void hyper_connection_norm_loaded(HYPER_NORM_ARGUMENTS, constant HyperCon
   hyper_norm_loaded_row(streams, norm, inject, normalized, weights, p, row, tid, lane, sg, scratch);
 }
 
-kernel void hyper_connection_norm_quarters(HYPER_NORM_ARGUMENTS, constant HyperConnectionParams &p [[buffer(5)]],
+[[max_total_threads_per_threadgroup(HYPER_CONNECTION_NORM_QUARTER_THREADS)]] kernel void hyper_connection_norm_quarters(HYPER_NORM_ARGUMENTS, constant HyperConnectionParams &p [[buffer(5)]],
                                            uint row [[threadgroup_position_in_grid]],
                                            uint thread_id [[thread_index_in_threadgroup]],
                                            uint lane [[thread_index_in_simdgroup]],

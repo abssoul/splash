@@ -420,7 +420,7 @@ inline void indexer_threshold(threadgroup atomic_uint *histogram, uint bins, uin
   threadgroup_barrier(mem_flags::mem_threadgroup);
 }
 
-kernel void block_indexer_select(device const float *scores [[buffer(0)]],
+[[max_total_threads_per_threadgroup(kSelectThreads)]] kernel void block_indexer_select(device const float *scores [[buffer(0)]],
                                  device uint *mask [[buffer(1)]],
                                  constant BlockIndexerParams &p [[buffer(2)]],
                                  uint2 group [[threadgroup_position_in_grid]],
