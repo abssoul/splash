@@ -5,9 +5,9 @@
 
 An unofficial port of [Inco's Splash](https://github.com/incoai/splash) to
 Macs with an M1 or M2 chip. Splash is a local inference engine that serves
-Qwen3.8-27B and Qwen3.6-35B-A3B to coding agents and to any OpenAI or
-Anthropic compatible client. Official Splash needs an M3 or newer; this fork
-runs the same engine, version 1.3.2, on M1 and M2.
+Qwen3.8-27B, Qwen3.6-35B-A3B and Qwen3.8-Flash-Next to coding agents and to
+any OpenAI or Anthropic compatible client. Official Splash needs an M3 or
+newer; this fork runs the same engine, version 1.4.0, on M1 and M2.
 
 **On an M3 or newer, use official Splash:** `brew install incoai/tap/splash`.
 Nothing here is faster there.
@@ -19,7 +19,8 @@ adds:
 - **Metal kernels written for these GPUs.** Upstream's kernels use Apple's
   matrix library, which runs far below these GPUs' simdgroup matrix rate and
   hangs the GPU on some GGUF shapes. The kernels here cover the MLX 4-bit
-  checkpoints, GGUF files, attention and the vision encoder.
+  checkpoints, GGUF files, attention, the vision encoder and Flash-Next's
+  own kernels.
 - **Neural Engine prefill on M1/M2.** The dense 27B splits each FFN layer of
   long prompts between the GPU and the Neural Engine, about 1.5x faster
   prefill on an M1 Max.
@@ -57,6 +58,7 @@ cache and survive upgrades.
 
 | Memory | Model | `--model` | Weights |
 |---|---|---|---|
+| 64 GB | Qwen3.8-Flash-Next, MoE | `ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF:Q2_0` | 66 GB |
 | 36 GB or more | Qwen3.8-27B, dense | `mlx-community/Qwen3.8-27B-4bit` | 15 GB |
 | 36 GB or more | Qwen3.6-35B-A3B, MoE, fastest | `mlx-community/Qwen3.6-35B-A3B-4bit` | 20 GB |
 | 36 GB or more | Qwen3.8-27B as GGUF, other quants | `unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M` | 17 GB |
@@ -66,8 +68,10 @@ cache and survive upgrades.
 The old `incoai/...-Splash` packages no longer load since Splash 1.3; serve
 the MLX checkpoint of the same model instead.
 
-Everything here was measured on a 64 GB Mac. The memory column for the first
-four rows is upstream's requirement. Bonsai was run with memory capped to
+Everything here was measured on a 64 GB Mac. The memory column for the 27B
+and 35B rows is upstream's requirement. Flash-Next fits a 64 GB Mac because
+its 27 GB per-layer embedding table stays on the SSD and is read as needed;
+the experts stay in memory. Bonsai was run with memory capped to
 11 GB, where it starts with a 28K context; a stock 16 GB Mac gives the GPU
 about 10.7 GB, slightly too little, so raise the limit first:
 
@@ -90,6 +94,11 @@ tok/s:
 | `mlx-community/Qwen3.6-35B-A3B-4bit` | | 127 |
 
 Prose is slower than code because the draft model guesses fewer tokens.
+
+Release 1.4.0-m1 adds Qwen3.8-Flash-Next, which decodes about 47 tok/s on a
+prose prompt. It is also faster on GGUF: the 27B in UD-Q5_K_M decodes 4.5 to
+6% faster with the new K-quant kernels, and 10% faster at 50K of context with
+the new attention tile.
 
 The 27B reads a cold 16K prompt at about 197 tok/s with the Neural Engine.
 In a replayed agent session that grows to 128K of context, prompt reading
@@ -140,8 +149,9 @@ twice the memory, and in a 128K agent session on an M1 Max it read prompts
 The API is upstream's: OpenAI Chat Completions, OpenAI Responses and
 Anthropic Messages on `127.0.0.1:8000`, with streaming, tool calls, images
 and PDFs. `splash-m1 serve --help` lists the options. For the rest, read
-[the README of the 1.3.2 branch](https://github.com/paperniuk/splash/blob/apple7-m1-1.3.2/README.md)
-with `splash-m1` in place of `splash`.
+[the README of the 1.4 branch](https://github.com/paperniuk/splash/blob/apple7-m1-1.4/README.md)
+with `splash-m1` in place of `splash`. Since 1.4, `--max-context` can go past
+a model's native window with YaRN (`--yarn-factor`).
 
 Reasoning is turned off per request with `"reasoning_effort": "none"`.
 
@@ -150,22 +160,22 @@ Reasoning is turned off per request with `"reasoning_effort": "none"`.
 Needs Xcode with the Metal Toolchain.
 
 ```bash
-git clone -b apple7-m1-1.3.2 https://github.com/paperniuk/splash.git
+git clone -b apple7-m1-1.4 https://github.com/paperniuk/splash.git
 cd splash
 make -j4
 ./splash serve --model mlx-community/Qwen3.8-27B-4bit
 ```
 
-Branch `apple7-m1-1.3.2` is upstream 1.3.2 plus the M1/M2 commits. `main`
+Branch `apple7-m1-1.4` is upstream 1.4.0 plus the M1/M2 commits. `main`
 follows upstream and does not run on M1/M2.
 
 ## Status
 
-- Stable: [1.3.2-m1.2](https://github.com/paperniuk/splash/releases/latest),
-  upstream 1.3.2 plus the M1/M2 work.
+- Stable: [1.4.0-m1](https://github.com/paperniuk/splash/releases/latest),
+  upstream 1.4.0 plus the M1/M2 work.
 - Known gaps: the 35B MoE's expert kernels are not tuned for M1/M2 yet;
-  GGUF models and Macs below 64 GB are covered by the kernel tests, not run
-  end to end on this release.
+  Macs below 64 GB are covered by the kernel tests, not run end to end on
+  this release.
 
 Problems on M1/M2 belong in [this fork's issues](https://github.com/paperniuk/splash/issues),
 not upstream's.
@@ -177,7 +187,10 @@ Splash is built by [Inco](https://github.com/incoai/splash); the
 is useful to you, please star the original too. The installer is based on
 npanj's `install-q8.sh`. Alexander Fedora
 ([@ghisguth](https://github.com/ghisguth)) tested the port on an M2 Max and
-contributed the faster GGUF Q4_0 decode.
+contributed most of its decode speedups: GGUF Q4_0, the K-quant
+and MLX decode kernels and fewer decode passes.
+[@sady4850](https://github.com/sady4850) contributed the faster long-context
+attention.
 
 Apache-2.0, see [LICENSE](LICENSE); the GGUF kernels include MIT-licensed
 material from llama.cpp, see [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).
