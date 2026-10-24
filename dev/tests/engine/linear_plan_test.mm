@@ -8,6 +8,7 @@
 #include "metal/abi/Gguf.h"
 #include "metal/abi/QuantFormat.h"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <initializer_list>
@@ -743,6 +744,36 @@ void rotatedRegisterInput(metal::MetalBackend &backend) {
     (void)Normalization::addRms(graph, rows, norm, rows, 17408, lanes * 8, scratch, plan.input());
     require(graph.dispatches().back().pipelineName.find("_table") == std::string::npos,
             "a rotated register plan's input norm wrote a table");
+  }
+  // Apple7/8 (Ternary Bonsai's PQ2_0 on an M1 Pro, issue #22): the producer
+  // still writes plain rows, and the plan prepares its F32 instances' Table16F
+  // from the rotated rows, in a scratch sized for that table.
+  const Linear m1 = gpu(7, 16);
+  Projection weighted(5120, 17408, BlockWeights{{segmentPlanes(backend, GGUF_FMT_PQ20, 5120, 17408)}});
+  weighted.rotation = rotated.rotation;
+  for (uint32_t lanes = 1; lanes <= 4; ++lanes) {
+    const LinearPlan plan = m1.decodePlan(rotated, lanes);
+    const uint64_t rows = plan.storageRows();
+    const LinearScratchSize size = plan.scratchSize();
+    require(plan.configuration().tile == LinearTile::GgufRegister && plan.input() == LinearInput::Plain &&
+                plan.table() == LinearInput::Table16F && m1.decodePlan(plain, lanes).input() == LinearInput::Table16F &&
+                size.input == tableBytes(17408, rows, LinearInput::Table16F) &&
+                size.sums == tableSumsBytes(LinearInput::Table16F, 17408, rows),
+            "an Apple7 rotated register plan's table");
+    const LinearBuffers buffers{.input = allocate(backend, rows * 17408 * 2),
+                                .output = allocate(backend, rows * 5120 * 2),
+                                .scratch = {allocate(backend, size.input), allocate(backend, size.sums),
+                                            allocate(backend, std::max<uint64_t>(size.partials, 4)),
+                                            allocate(backend, std::max<uint64_t>(size.counters, 4)),
+                                            allocate(backend, rows * 17408 * 2)}};
+    metal::CommandGraph graph;
+    (void)m1.add(graph, buffers, weighted, plan);
+    const auto ran = [&](std::string_view prefix) {
+      return std::any_of(graph.dispatches().begin(), graph.dispatches().end(),
+                         [&](const auto &d) { return d.pipelineName.starts_with(prefix); });
+    };
+    require(ran("gguf_rotate") && ran("decode_linear_gguf_prepare_f") && ran("gguf_decode_sgf_"),
+            "an Apple7 rotated register plan rotates, prepares Table16F and runs the F32 tile");
   }
 }
 

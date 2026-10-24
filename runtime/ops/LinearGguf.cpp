@@ -288,7 +288,7 @@ LinearScratchSize LinearPlan::scratchSize() const noexcept {
   if (config_.tile == LinearTile::GgufRegister) {
     const uint64_t rows = workload_.rows, partitions = config_.oneGateUpPass ? 2 * config_.splits : config_.splits;
     const uint64_t tileCols = config_.oneGateUpPass ? 32 : GGUF_TILE_COLUMNS;
-    return {tableBytes(k, rows, input()), tableSumsBytes(input(), k, rows),
+    return {tableBytes(k, rows, table()), tableSumsBytes(table(), k, rows),
             partitions > 1 ? partitions * rows * n * sizeof(float) : 0,
             partitions > 1 ? uint64_t{n / tileCols} * sizeof(uint32_t) : 0};
   }
@@ -570,10 +570,12 @@ void Linear::addGgufRegister(metal::CommandGraph &graph, const LinearBuffers &b,
         if (!quant_register_format(s.formatId))
           throw std::invalid_argument(std::string("the register tile does not take ") + s.name() + " weights");
   // Apple7/8's F32 instances read fp32 tables, the others bf16.
-  if ((plan.input() == LinearInput::Table16F) != mmaTiles(family_))
+  // A rotated plan prepares its table here from the rotated rows, whatever
+  // its producer wrote (LinearPlan::table, not input()).
+  if ((plan.table() == LinearInput::Table16F) != mmaTiles(family_))
     throw std::invalid_argument("the register tile's table type does not match the GPU family");
-  if (b.prepared.layout != plan.input() || !b.prepared.source.sameView(b.input))
-    graph.add(plan.input() == LinearInput::Table16F ? "decode_linear_gguf_prepare_f" : "decode_linear_gguf_prepare",
+  if (b.prepared.layout != plan.table() || !b.prepared.source.sameView(b.input))
+    graph.add(plan.table() == LinearInput::Table16F ? "decode_linear_gguf_prepare_f" : "decode_linear_gguf_prepare",
               {b.input, b.scratch.input, b.scratch.sums}, k, {k / 32, lanes, 1}, {128, 1, 1});
   const metal::DispatchSize grid{segmentColumns(p) / GGUF_TILE_COLUMNS, config.splits, 1};
   const std::string suffix = "_l" + std::to_string(lanes);
