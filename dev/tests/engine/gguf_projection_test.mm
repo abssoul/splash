@@ -605,6 +605,42 @@ void oneGateUpPass(MetalBackend &backend, const Linear &linear, bool spread) {
           "S 1-8, bitwise the two passes");
 }
 
+// Gate/up in one pass on Apple7/8's register tile (LinearConfig::oneGateUpPass with fp32Table): every format it takes
+// at [768, 2048], 1-4 lanes, and Q4_K and MLX 4-bit at the 27B's [17408, 5120], 1 and 4 lanes, at every K split the
+// tile takes, bitwise the gate and up passes, whatever the partials held before. `linear` is Apple7/8's.
+void registerOneGateUpPass(MetalBackend &backend, const Linear &linear) {
+  uint32_t mostSplits = 1;
+  const auto pairs = [&](Fmt f, uint32_t N, uint32_t K, uint32_t columns, std::span<const uint32_t> lanes) {
+    const Tensor g = tensor(backend, f, N, K), u = tensor(backend, f, N, K);
+    const Projection gate = projection({&g}, columns), up = projection({&u}, columns);
+    const std::vector<float> x = activations(Inputs::Dense, kMaximumRows, K);
+    for (const uint32_t splits : kSplits) {
+      if (K / 256 < splits) continue;
+      mostSplits = std::max(mostSplits, splits);
+      for (const uint32_t l : lanes) {
+        const LinearWorkload wl = decode({columns, K}, l, LinearEpilogue::GateUp);
+        LinearConfig c = config(LinearTile::GgufRegister, wl, splits);
+        const LinearPlan twoPasses = Linear::plan(wl, c, FloatOutput::BFloat16);
+        c.oneGateUpPass = true;
+        const LinearPlan onePass = Linear::plan(wl, c, FloatOutput::BFloat16);
+        const std::string label = std::string(fmtName(f)) + " " + std::to_string(N) + "x" + std::to_string(K) +
+                                  " S=" + std::to_string(splits) + " L=" + std::to_string(l);
+        const std::vector<uint16_t> rows = storageRows(x, K, wl.rows, onePass.storageRows());
+        const Outcome two = run(backend, linear, twoPasses, up, &gate, rows, {}, kPoisonNaN, N, label + " two passes");
+        const Outcome one = run(backend, linear, onePass, up, &gate, rows, {}, kPoisonFinite, N, label);
+        if (!sameRows(one.output, 0, two.output, 0, wl.rows, columns)) fail(label + ": differs from the two passes");
+      }
+    }
+  };
+  constexpr uint32_t kAllLanes[] = {1, 2, 3, 4}, kEndLanes[] = {1, kMaximumLanes};
+  const std::vector<Fmt> formats = tileFormats(LinearTile::GgufRegister);
+  for (const Fmt f : formats) pairs(f, 768, decodeInputs(false), 768 + kPadding, kAllLanes);
+  for (const Fmt f : {Q4K, Fmt(GGUF_FMT_AF4G64)}) pairs(f, 17408, 5120, 17408, kEndLanes);
+  section("register one-pass gate/up (Apple7/8): " + std::to_string(formats.size()) + " formats at 768x" +
+          std::to_string(decodeInputs(false)) + ", 1-4 lanes, and Q4_K and MLX 4-bit at 17408x5120, 1 and 4 lanes, S 1-" +
+          std::to_string(mostSplits) + ", bitwise the two passes");
+}
+
 // ---------------------------------------------------------------- prefill
 // 168- and 136-row chunks on the 128-row tiles: the second tile holds 40 or 8 rows, so its last two or three 32-row
 // simdgroups skip their matmuls, though not the barriers of the stage they share, and leave the rows from 192 or 160
@@ -946,6 +982,8 @@ int main(int argc, char **argv) {
       // MMA kernels, whose bits it does not match.
       if (backend.capabilities().appleGpuFamily >= 9)
         for (const bool spread : {false, true}) oneGateUpPass(backend, linear, spread);
+      else
+        registerOneGateUpPass(backend, linear);
       prefill(backend, linear);
       leadingInputs(backend, linear);
       if (!fp32RegisterTable) {
@@ -957,6 +995,7 @@ int main(int argc, char **argv) {
         fp32RegisterTable = true;
         decodeTile(backend, m1, LinearTile::GgufRegister, false);
         gateUpPairs(backend, m1, LinearTile::GgufRegister);
+        registerOneGateUpPass(backend, m1);
         fp32RegisterTable = false;
         section("register decode again on Apple7/8's F32 instances");
       }
