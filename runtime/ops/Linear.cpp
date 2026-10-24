@@ -116,8 +116,8 @@ const char *tableSuffix(LinearInput layout) noexcept {
   return layout == LinearInput::Table16F ? "_table16f" : layout == LinearInput::Table16 ? "_table16" : "";
 }
 
-LinearInput LinearPlan::input() const noexcept {
-  if (rotated_) return LinearInput::Plain;
+LinearInput LinearPlan::input() const noexcept { return rotated_ ? LinearInput::Plain : table(); }
+LinearInput LinearPlan::table() const noexcept {
   if (config_.tile != LinearTile::GgufRegister) return LinearInput::Plain;
   return config_.fp32Table ? LinearInput::Table16F : LinearInput::Table16;
 }

@@ -202,6 +202,9 @@ public:
   // projection prepares its table from the rotated rows itself
   // (LinearGguf.cpp), so its producer writes plain rows.
   [[nodiscard]] LinearInput input() const noexcept;
+  // The table the plan's register tile reads, Plain for the other tiles: the
+  // producer's (input()) or, rotated, the one the plan prepares itself.
+  [[nodiscard]] LinearInput table() const noexcept;
   [[nodiscard]] LinearScratchSize scratchSize() const noexcept;
   [[nodiscard]] uint64_t gateScratchBytes() const noexcept;
 
