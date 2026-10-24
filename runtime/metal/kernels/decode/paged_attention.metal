@@ -78,6 +78,7 @@ PAGED_VERIFY_SPLIT(verify_attention_bf16_split_kv2_g8, 2, 8, bfloat)
       uint3 group [[threadgroup_position_in_grid]],                            \
       uint sg [[simdgroup_index_in_threadgroup]],                              \
       uint lane [[thread_index_in_simdgroup]]) {                               \
+    threadgroup uint query_stage[Group * 32 * 32];                             \
     const SplashAttentionTile tile =                                           \
         splash_verify_attention_tile<Heads, Group>(params[group.z], group.x,   \
                                                    group.z);                   \
@@ -89,7 +90,7 @@ PAGED_VERIFY_SPLIT(verify_attention_bf16_split_kv2_g8, 2, 8, bfloat)
                             page_table3),                                      \
         params[group.z].kv, group.x, tile.first_position, tile.active_rows,    \
         tile.splits, group.y, partials, statistics, tile.first_slot + group.y, \
-        sg, lane);                                                             \
+        sg, lane, query_stage);                                                             \
   }
 
 SGF_VERIFY_SPLIT(verify_attention_q8_split_sgf, 4, 6, int8_t)
