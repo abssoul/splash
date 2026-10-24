@@ -650,6 +650,29 @@ void ggufPlans() {
         }
       }
     }
+  // Apple7/8's register tile runs a gate/up pair of one format in one pass for GGUF formats;
+  // MLX af4g64 and pairs of two formats run two passes. The decode scratch bound covers the one pass.
+  for (const uint32_t cores : {8U, 32U, 38U}) {
+    const Linear m1 = gpu(7, cores);
+    for (const uint32_t n : {1024U, 17408U})
+      for (const uint32_t rows : {8U, 32U}) {
+        const Projection up = blockProjection(n, 5120, 1, GGUF_FMT_Q4K), same = blockProjection(n, 5120, 1, GGUF_FMT_Q4K),
+                         other = blockProjection(n, 5120, 1, GGUF_FMT_Q6K),
+                         up_af4 = blockProjection(n, 5120, 1, GGUF_FMT_AF4G64),
+                         same_af4 = blockProjection(n, 5120, 1, GGUF_FMT_AF4G64);
+        const LinearWorkload gateUp{{n, 5120}, rows, LinearPhase::Decode, LinearEpilogue::GateUp};
+        const LinearPlan one = m1.plan(gateUp, up, &same), two = m1.plan(gateUp, up, &other),
+                         af4 = m1.plan(gateUp, up_af4, &same_af4);
+        const LinearConfig c = one.configuration();
+        require(c.tile == LinearTile::GgufRegister && c.fp32Table && c.oneGateUpPass &&
+                    !two.configuration().oneGateUpPass && !af4.configuration().oneGateUpPass,
+                "Apple7/8 register gate/up pass default");
+        const LinearScratchSize bound = m1.decodeScratchSize({n, 5120}), need = one.scratchSize();
+        require(need.partials == uint64_t{2} * c.splits * rows * n * 4 && need.counters == n / 32 * 4 &&
+                    bound.partials >= need.partials && bound.counters >= need.counters,
+                "Apple7/8 one-pass gate/up scratch");
+      }
+  }
   rejects(
       [&] {
         (void)Linear::plan(down, {.tile = LinearTile::GgufRegister, .splits = 8, .spread = true},
@@ -660,7 +683,14 @@ void ggufPlans() {
       [&] {
         (void)Linear::plan(down, {.tile = LinearTile::GgufStaged, .oneGateUpPass = true}, FloatOutput::BFloat16);
       },
-      "only a staged block gate/up decode runs gate and up in one pass", "a residual plan ran gate/up in one pass");
+      "only a staged or F32 register block gate/up decode runs gate and up in one pass", "a residual plan ran gate/up in one pass");
+  rejects(
+      [&] {
+        (void)Linear::plan({down.matrix, 8, LinearPhase::Decode, LinearEpilogue::GateUp},
+                           {.tile = LinearTile::GgufRegister, .oneGateUpPass = true}, FloatOutput::BFloat16);
+      },
+      "only a staged or F32 register block gate/up decode runs gate and up in one pass",
+      "a bf16-table register plan ran gate/up in one pass");
   // The 16-row tile holds one lane's decode rows on the staged tile only.
   for (const auto &[w, config] :
        {std::pair{down, LinearConfig{.tile = LinearTile::GgufRegister, .sixteenRows = true}},

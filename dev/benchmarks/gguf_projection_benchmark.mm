@@ -275,17 +275,26 @@ int main(int argc, char **argv) {
                 }))
               continue;
             if (registerTile ? K / 256 < splits : (K / 32) % splits) continue;
+            // The register tile runs gate/up in two passes and, where the policy does, in one (register_gu).
+            const bool canOnePass = registerTile && policy.oneGateUpPass;
+            const std::vector<bool> onePassChoices =
+                canOnePass ? std::vector<bool>{false, true} : std::vector<bool>{false};
             // One lane stages on the 8-row tile and on the 16-row tile (staged16).
+            for (const bool onePass : onePassChoices)
             for (const bool sixteenRows : {false, true}) {
               if (sixteenRows && (registerTile || lanes > 1)) continue;
-              // Apple7/8's register tile reads an fp32 table.
+              // Apple7/8's register tile reads an fp32 table. The staged rows take one pass only from a staged
+              // policy: Apple7/8's register policy sets it for the register tile.
               const LinearConfig config{.tile = tile, .splits = splits, .spread = !registerTile && wide.spread,
-                                        .oneGateUpPass = !registerTile && wide.oneGateUpPass,
+                                        .oneGateUpPass = registerTile ? onePass
+                                                                      : wide.tile == LinearTile::GgufStaged &&
+                                                                            wide.oneGateUpPass,
                                         .fp32Table = registerTile && backend.capabilities().appleGpuFamily < 9,
                                         .sixteenRows = sixteenRows};
               cases.push_back({"L" + std::to_string(lanes),
-                               std::string(registerTile ? "register" : sixteenRows ? "staged16" : "staged") + " S" +
-                                   std::to_string(splits),
+                               std::string(registerTile ? (onePass ? "register_gu" : "register")
+                                                        : sixteenRows ? "staged16" : "staged") +
+                                   " S" + std::to_string(splits),
                                Linear::plan(w, config, FloatOutput::BFloat16), config == policy, {}});
             }
           }

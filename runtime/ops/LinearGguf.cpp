@@ -183,6 +183,13 @@ bool oneFormat(std::span<const Projection *const> projections) {
   return up.size() == 1 && gate.size() == 1 && !up.front().isFloat() && up.front().formatId == gate.front().formatId;
 }
 
+// Whether Apple7/8 decodes a gate/up pair in one pass on its register tile:
+// GGUF formats only; MLX affine formats (af4g64) keep two passes because
+// 17408x5120 regresses +2-4% at 3-4 lanes.
+bool apple7GateUpFormat(std::span<const Projection *const> projections) {
+  return oneFormat(projections) && !quant_affine_format(projections.front()->blocks().segments.front().formatId);
+}
+
 // Whether Apple9 decodes a plan's projections (a gate/up plan's two) on the
 // staged tile: where it holds the lanes' rows unpadded, so the plan binds the
 // register tile's rows, and every quantized segment is in a format of
@@ -295,8 +302,9 @@ void LinearPlan::requireConfiguration() const {
   const bool decode = workload_.phase == LinearPhase::Decode;
   if (c.spread && c.tile != LinearTile::GgufStaged)
     throw std::invalid_argument("only the staged block tile spreads its walks");
-  if (c.oneGateUpPass && (c.tile != LinearTile::GgufStaged || !decode || workload_.epilogue != LinearEpilogue::GateUp))
-    throw std::invalid_argument("only a staged block gate/up decode runs gate and up in one pass");
+  if (c.oneGateUpPass && ((c.tile != LinearTile::GgufStaged && !c.fp32Table) || !decode ||
+                          workload_.epilogue != LinearEpilogue::GateUp))
+    throw std::invalid_argument("only a staged or F32 register block gate/up decode runs gate and up in one pass");
   if (c.sixteenRows && (c.tile != LinearTile::GgufStaged || !decode || workload_.rows != SPLASH_TARGET_VERIFY_ROWS))
     throw std::invalid_argument("only a staged one-lane block decode runs the 16-row tile");
   if (c.tile == LinearTile::GgufRegister) {
@@ -331,10 +339,11 @@ LinearScratchSize LinearPlan::scratchSize() const noexcept {
   // [column] partials and one counter per 64-column tile, which covers every
   // lane.
   if (config_.tile == LinearTile::GgufRegister) {
-    const uint64_t rows = workload_.rows;
+    const uint64_t rows = workload_.rows, partitions = config_.oneGateUpPass ? 2 * config_.splits : config_.splits;
+    const uint64_t tileCols = config_.oneGateUpPass ? 32 : GGUF_TILE_COLUMNS;
     return {tableBytes(k, rows, table()), tableSumsBytes(table(), k, rows),
-            config_.splits > 1 ? config_.splits * rows * n * sizeof(float) : 0,
-            config_.splits > 1 ? uint64_t{n / GGUF_TILE_COLUMNS} * sizeof(uint32_t) : 0};
+            partitions > 1 ? partitions * rows * n * sizeof(float) : 0,
+            partitions > 1 ? uint64_t{n / tileCols} * sizeof(uint32_t) : 0};
   }
   // Staged split-K: [split][row][column] fp32 partials over the tile's rows,
   // a one-pass gate/up's of both tensors, and one counter per column tile (a
@@ -382,6 +391,11 @@ LinearConfig Linear::ggufBaseline(LinearWorkload w, std::span<const Projection *
   if (mmaTiles(family_) && shape.registerFormats && everyQuantizedSegment(projections, registerTileTakes)) {
     LinearConfig config = registerDecode(n, k, gpuCores_);
     config.fp32Table = true;
+    // A gate/up pair of one format runs as one dispatch of both tensors' K
+    // partitions, the last to arrive applying the gate: the 27B pair takes
+    // 4-8% less time than as a gate pass and an up pass on an M2 Max.
+    // MLX affine formats (af4g64) keep two passes: 17408x5120 regresses +2-4% at 3-4 lanes.
+    config.oneGateUpPass = w.epilogue == LinearEpilogue::GateUp && apple7GateUpFormat(projections);
     return config;
   }
   // Decode tiles walking K in lockstep all fetch the same slice of the input
@@ -450,6 +464,11 @@ LinearScratchSize Linear::ggufDecodeScratchSize(LinearWorkload w, bool registerF
     size.include(LinearPlan(w, stagedDecode(n, k, gpuCores_, family_)).scratchSize());
   if (w.epilogue == LinearEpilogue::GateUp && spreadsStagedDecode(family_, gpuCores_))
     size.include(LinearPlan(w, oneGateUpPassDecode(n, k, gpuCores_, family_)).scratchSize());
+  if (w.epilogue == LinearEpilogue::GateUp && mmaTiles(family_)) {
+    LinearConfig onePass = registerDecode(n, k, gpuCores_);
+    onePass.fp32Table = onePass.oneGateUpPass = true;
+    size.include(LinearPlan(w, onePass).scratchSize());
+  }
   return size;
 }
 
@@ -661,6 +680,19 @@ void Linear::addGgufRegister(metal::CommandGraph &graph, const LinearBuffers &b,
   const std::string suffix = "_l" + std::to_string(lanes);
   const std::string prefix = mmaTiles(family_) ? "gguf_decode_sgf_" : "gguf_decode_sg_";
   const auto [partials, counters] = splitScratch(b, config.splits);
+  if (config.oneGateUpPass) {
+    const std::vector<QuantizedSegment> &gates = gate->blocks().segments;
+    if (!mmaTiles(family_) || segments.size() != 1 || gates.size() != 1 ||
+        gates.front().formatId != segments.front().formatId)
+      throw std::invalid_argument("a one-pass register gate/up takes single tensors of one format on Apple7/8");
+    const QuantizedSegment &g = gates.front(), &u = segments.front();
+    graph.add(prefix + u.name() + suffix + "_gu",
+              {b.scratch.input, b.scratch.sums, g.plane0, g.plane1Slot(), g.meta, u.plane0, u.plane1Slot(), u.meta,
+               b.output, partials, counters},
+              GgufDecodeParams{k, config.splits, n, u.columnOffset, 0},
+              {u.outputSize / 32, config.splits, 1}, {GGUF_REGISTER_THREADS, 1, 1});
+    return;
+  }
   const auto tensor = [&](const QuantizedSegment &s, char epilogue, const metal::MetalBuffer &output,
                           const metal::MetalBuffer &aux) {
     graph.add(kernelInstance(prefix + s.name() + suffix + "_" + epilogue, plan.destination()),
