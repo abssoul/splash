@@ -1,6 +1,17 @@
 #include "metal/abi/KernelABI.h"
 #include "metal/kernels/common/target_rope.h"
 
+// A draft row's cosine and sine, the same in both table kernels: a restore
+// rotates the keys it computes again as their capture did, bit for bit. Fast
+// cos/sin of one angle differ between the two kernels on Apple7 (by up to
+// 4e-4 at position 6130), so the draft tables take precise::sincos.
+static inline void draft_rope(float angle, device float *cosine, device float *sine) {
+  float c;
+  const float s = metal::precise::sincos(angle, c);
+  *cosine = c;
+  *sine = s;
+}
+
 kernel void rope_build_tables(
     device const uint *target_positions [[buffer(0)]],
     device const uint *draft_positions [[buffer(1)]],
@@ -29,10 +40,8 @@ kernel void rope_build_tables(
   for (uint element = index; element < draft_elements; element += grid_size) {
     const uint row = element / SPLASH_DRAFT_ROPE_PAIRS;
     const uint dim = element % SPLASH_DRAFT_ROPE_PAIRS;
-    const float angle =
-        float(draft_positions[row]) * draft_inverse_frequencies[dim];
-    draft_cosine[element] = cos(angle);
-    draft_sine[element] = sin(angle);
+    draft_rope(float(draft_positions[row]) * draft_inverse_frequencies[dim], draft_cosine + element,
+               draft_sine + element);
   }
 }
 
@@ -48,9 +57,7 @@ kernel void rope_build_draft_range_tables(
   for (uint element = index; element < draft_elements; element += grid_size) {
     const uint row = element / SPLASH_DRAFT_ROPE_PAIRS;
     const uint dim = element % SPLASH_DRAFT_ROPE_PAIRS;
-    const float angle = float(params.start_position + row) *
-                        draft_inverse_frequencies[dim];
-    draft_cosine[element] = cos(angle);
-    draft_sine[element] = sin(angle);
+    draft_rope(float(params.start_position + row) * draft_inverse_frequencies[dim], draft_cosine + element,
+               draft_sine + element);
   }
 }
