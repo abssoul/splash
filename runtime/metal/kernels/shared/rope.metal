@@ -1,5 +1,16 @@
 #include "metal/abi/KernelABI.h"
 
+// A row's cosine and sine at `angle`, precise: Apple7's fast cos/sin differ
+// between kernels for one angle (draft range rows by up to 4e-4 at position
+// 6130 from the listed ones a restore must reproduce bit for bit) and are
+// off by ~5e-5 at the angles of long contexts.
+static inline void rope_pair(float angle, device float *cosine, device float *sine) {
+  float c;
+  const float s = metal::precise::sincos(angle, c);
+  *cosine = c;
+  *sine = s;
+}
+
 kernel void rope_build_tables(
     device const uint *target_positions [[buffer(0)]],
     device const uint *draft_positions [[buffer(1)]],
@@ -18,19 +29,15 @@ kernel void rope_build_tables(
   for (uint element = index; element < target_elements; element += grid_size) {
     const uint row = element / SPLASH_TARGET_ROPE_PAIRS;
     const uint dim = element % SPLASH_TARGET_ROPE_PAIRS;
-    const float angle = float(target_positions[row * 3 + dim % 3]) *
-                        target_inverse_frequencies[dim];
-    target_cosine[element] = cos(angle);
-    target_sine[element] = sin(angle);
+    rope_pair(float(target_positions[row * 3 + dim % 3]) * target_inverse_frequencies[dim],
+              target_cosine + element, target_sine + element);
   }
   const uint draft_elements = params.draft_rows * SPLASH_DRAFT_ROPE_PAIRS;
   for (uint element = index; element < draft_elements; element += grid_size) {
     const uint row = element / SPLASH_DRAFT_ROPE_PAIRS;
     const uint dim = element % SPLASH_DRAFT_ROPE_PAIRS;
-    const float angle =
-        float(draft_positions[row]) * draft_inverse_frequencies[dim];
-    draft_cosine[element] = cos(angle);
-    draft_sine[element] = sin(angle);
+    rope_pair(float(draft_positions[row]) * draft_inverse_frequencies[dim], draft_cosine + element,
+              draft_sine + element);
   }
 }
 
@@ -46,9 +53,7 @@ kernel void rope_build_draft_range_tables(
   for (uint element = index; element < draft_elements; element += grid_size) {
     const uint row = element / SPLASH_DRAFT_ROPE_PAIRS;
     const uint dim = element % SPLASH_DRAFT_ROPE_PAIRS;
-    const float angle = float(params.start_position + row) *
-                        draft_inverse_frequencies[dim];
-    draft_cosine[element] = cos(angle);
-    draft_sine[element] = sin(angle);
+    rope_pair(float(params.start_position + row) * draft_inverse_frequencies[dim], draft_cosine + element,
+              draft_sine + element);
   }
 }
