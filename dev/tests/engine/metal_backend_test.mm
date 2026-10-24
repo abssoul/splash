@@ -1471,7 +1471,7 @@ void commandBreaksSplitBuffers(const std::string &metallibPath) {
             "takes no event", "a break naming an event was submitted");
     std::vector<EventStep> breaks(512, EventStep{1, {}, 0, Break});
     rejects([&] { (void)backend.submitCommandAsync(Command{dispatches, breaks}); },
-            "more events than its queue holds", "a command of 513 buffers was submitted");
+            "more command buffers than its queue holds", "a command of 513 buffers was submitted");
     require(backend.healthy() && BackendInstrumentation::submittedCommands(backend) == 0,
             "a refused break marked the backend unhealthy or submitted work");
     auto submitted =
