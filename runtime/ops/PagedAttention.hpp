@@ -246,7 +246,7 @@ public:
   // plan depends on the rows only.
   [[nodiscard]] static PrefillAttentionPlan
   prefillPlan(uint32_t rows, uint32_t queryHeads, kv::Layout layout,
-              AttentionTile tile = AttentionTile::Mpp);
+              AttentionTile tile = AttentionTile::Mpp, uint32_t gpuCores = 0);
   // historyTokens holds each lane's committed tokens before its verify rows,
   // one entry per lane.
   [[nodiscard]] static VerifyAttentionPlan
@@ -260,7 +260,8 @@ public:
   // the maximum split count.
   [[nodiscard]] static AttentionWorkspace
   prefillWorkspace(uint32_t maximumRows, uint32_t queryHeads,
-                   kv::Layout layout);
+                   kv::Layout layout, AttentionTile tile = AttentionTile::Mpp,
+                   uint32_t gpuCores = 0);
   [[nodiscard]] static AttentionWorkspace
   verifyWorkspace(uint32_t lanes, uint32_t queryHeads, kv::Layout layout);
 

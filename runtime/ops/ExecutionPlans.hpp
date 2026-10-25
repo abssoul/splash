@@ -48,6 +48,7 @@ private:
 
   Linear linear_;
   GpuFamilyClass family_;
+  uint32_t gpuCores_ = 0;
   // Apple7/8 have no bfloat arithmetic: their prefill and verify attention
   // run the register kernels.
   AttentionTile attentionTile_ = AttentionTile::Mpp;
