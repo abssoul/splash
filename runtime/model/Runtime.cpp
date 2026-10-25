@@ -3061,6 +3061,10 @@ uint32_t Runtime::prefillTailAlignment() const noexcept {
   return family == 7 || family == 8 ? 128 : 0;
 }
 
+uint32_t Runtime::prefillAneMinimumRows() const noexcept {
+  return impl_->aneFfn ? impl_->aneFfn->minimumRows() : 0;
+}
+
 uint64_t Runtime::snapshotBytes() const noexcept {
   return impl_->states.layout().cachedBytes();
 }

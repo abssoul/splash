@@ -697,13 +697,14 @@ void testShortenedPrefillResumesFromItsRows() {
 }
 
 // With tail alignment, a prompt's last rows a few past a multiple of it end
-// that command on the multiple and leave the rest to the next; rows that do
-// not finish the prompt, rows too far past, too few rows and no alignment
-// keep the whole budget.
+// that command on the multiple and leave the rest to the next, unless trimming
+// drops the command below the Neural Engine minimum; rows that do not finish
+// the prompt, rows too far past, too few rows and no alignment keep the whole
+// budget.
 void testAlignedPrefillLeavesItsTail() {
-  const auto first = [](uint32_t alignment, uint32_t prompt) {
+  const auto first = [](uint32_t alignment, uint32_t prompt, uint32_t aneMinimum = 0) {
     engine::Scheduler scheduler(0.0);
-    scheduler.alignPrefillTails(alignment);
+    scheduler.alignPrefillTails(alignment, aneMinimum);
     scheduler.submit(request(1, prompt));
     scheduler.resourcesReady(1, 0);
     return scheduler.next({})->items.at(0).tokenCount;
@@ -713,6 +714,13 @@ void testAlignedPrefillLeavesItsTail() {
   require(first(128, 384) == 384 && first(128, 360) == 360 && first(128, 288 - 32 - 1) == 255 &&
               first(128, 280) == 256 && first(0, 288) == 288 && first(128, 2048 + 4096 + 16) == 2048,
           "tail alignment cut rows it must keep");
+  // Skipping the trim when it would drop the command below the Neural Engine minimum:
+  require(first(128, 288, 280) == 288 && first(128, 276, 280) == 256 && first(128, 416, 280) == 384,
+          "an aligned prompt's last command trimmed below the ANE minimum or failed to trim above it");
+  require(first(128, 288, 256) == 256,
+          "an aligned prompt's last command kept its tail although the trimmed rows reach the ANE minimum");
+  require(first(128, 288, 0) == 256,
+          "tail alignment without ANE minimum changed behaviour");
   engine::Scheduler scheduler(0.0);
   scheduler.alignPrefillTails(128);
   scheduler.submit(request(1, 288));
@@ -721,6 +729,16 @@ void testAlignedPrefillLeavesItsTail() {
   const BatchPlan tail = *scheduler.next({});
   require(tail.items.size() == 1 && tail.items[0].promptOffset == 256 && tail.items[0].tokenCount == 32,
           "the aligned prompt's tail did not run next");
+  engine::Scheduler aneScheduler(0.0);
+  aneScheduler.alignPrefillTails(128, 280);
+  aneScheduler.submit(request(1, 2048 + 288));
+  aneScheduler.resourcesReady(1, 0);
+  require(aneScheduler.next({})->items.at(0).tokenCount == 2048,
+          "the long prompt did not run its first full chunk");
+  completePrefill(aneScheduler, *aneScheduler.next({}));
+  const BatchPlan second = *aneScheduler.next({});
+  require(second.items.size() == 1 && second.items[0].promptOffset == 2048 && second.items[0].tokenCount == 288,
+          "the second command did not keep its 288 rows whole on ANE");
 }
 
 void testEqualPromptsFinishInArrivalOrder() {

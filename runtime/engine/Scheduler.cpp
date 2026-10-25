@@ -30,7 +30,9 @@ constexpr double kContendedPrefillMilliseconds = 500.0;
 // time measures prefill throughput: below it a command's fixed costs dominate.
 constexpr uint32_t kMinimumPrefillRows = 64;
 // The most rows past a multiple of the prefill tail alignment that a prompt's
-// last command leaves to one of their own: the decode tiles' rows.
+// last command leaves to one of their own: the decode tiles' rows, unless
+// that takes the command below the Neural Engine split's minimum
+// (Model::prefillAneMinimumRows), where it would run its FFN on the GPU alone.
 constexpr uint32_t kPrefillTailRows = 32;
 // The weight of a command's measured time in a running estimate (per row,
 // fixed, or a lane's wait on its history's reads): one unusually slow or
@@ -399,7 +401,8 @@ Scheduler::planPrefill(std::vector<PrefillRequestView> ready) const {
     const uint32_t remaining = view.request->spec.prefillTokens - view.promptProcessed;
     uint32_t rows = std::min(remaining, budget);
     if (const uint32_t tail = prefillTailAlignment_ ? rows % prefillTailAlignment_ : 0;
-        rows == remaining && rows > 2 * prefillTailAlignment_ && tail && tail <= kPrefillTailRows)
+        rows == remaining && rows > 2 * prefillTailAlignment_ && tail && tail <= kPrefillTailRows &&
+        !(aneMinimumRows_ && rows >= aneMinimumRows_ && rows - tail < aneMinimumRows_))
       rows -= tail;
     // The command's attention stays within maximumAttentionPairs_: a lane's
     // rows halve until they fit, and one that does not fit at

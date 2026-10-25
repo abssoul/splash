@@ -117,8 +117,12 @@ public:
   // `rows` long and at most kPrefillTailRows past one end on that multiple,
   // the rest in a later command, and the isolated bound keeps whole multiples
   // of `rows` rather than halving (model::Model::prefillTailAlignment); none
-  // for zero, the default.
-  void alignPrefillTails(uint32_t rows) noexcept { prefillTailAlignment_ = rows; }
+  // for zero, the default. No tail is left when the command's rows reach
+  // `aneMinimumRows` but would fall below it without the tail.
+  void alignPrefillTails(uint32_t rows, uint32_t aneMinimumRows = 0) noexcept {
+    prefillTailAlignment_ = rows;
+    aneMinimumRows_ = aneMinimumRows;
+  }
   // A prefill command of `rows` rows took wallMilliseconds, of which its GPU
   // work waited hostMilliseconds on host steps: a fixed part (a streamed
   // target's expert reads), the rest per row.
@@ -273,6 +277,7 @@ private:
   double isolatedPrefillMilliseconds_ = kDefaultPrefillCommandMilliseconds;
   uint32_t isolatedPrefillBuffers_ = 1;
   uint32_t prefillTailAlignment_ = 0;
+  uint32_t aneMinimumRows_ = 0;
   double decodeShare_;
   uint64_t maximumAttentionPairs_;
   // Decode time that prefill still owes the lanes that decoded beside it
