@@ -8144,6 +8144,21 @@ void testCheckpointsSkipNearResumeAndReplayBoundaries() {
           "a request checkpointed within a chunk of the state it resumed from");
 }
 
+// The contended prefill floor is a power of two the scheduler can halve to.
+void testContendedPrefillFloorValidation() {
+  test::TestKvStorage storage(1024, 4096, 4);
+  KvPool pool(storage, 0);
+  engine::Cache resources(pool, nullptr, nullptr);
+  Executor executor(1);
+  Events events;
+  for (uint32_t invalid : {0U, 32U, 96U, 4096U}) {
+    rejects([&] {
+      engine::Engine(test::engineConfig({.contendedPrefillRows = invalid}), resources, executor,
+                     events);
+    }, "contended prefill rows must be a power of two", "an invalid contended floor was accepted");
+  }
+}
+
 void testDecodeShareValidation() {
   test::TestKvStorage storage(1024, 4096, 4);
   KvPool pool(storage, 0);
@@ -11999,6 +12014,7 @@ int main() {
     testEveryEndReleasesTheReplayPoint();
     testWaitingEndsReleaseTheReplayPoint();
     testConcurrentColdPrefixesComputeOnce();
+    testContendedPrefillFloorValidation();
     testColdRequestReportsTheBlocksItReadFromTheCache();
     testBlocksFoundCachedAfterTheLastCommandAreNotReported();
     testCacheSaltsShareNothing();

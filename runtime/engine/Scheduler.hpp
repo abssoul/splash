@@ -91,6 +91,37 @@ struct SchedulerSnapshot final {
 // command's passes too.
 class Scheduler final {
 public:
+  // The smallest contended prefill floor, the minimum matrix shape: a
+  // contended prefill command never shrinks below this many rows, and a
+  // scheduler not configured otherwise (floorContendedPrefill) stops here.
+  static constexpr uint32_t kMinimumContendedPrefillRows = 64;
+  // The default floor on Apple GPU families 7 and 8 (defaultContendedPrefillRows).
+  static constexpr uint32_t kAppleSevenEightContendedPrefillRows = 256;
+
+  // The floor a serve start without --contended-prefill-rows runs with on
+  // Apple GPU family `appleGpuFamily`: 256 rows on families 7 and 8 (M1/M2),
+  // the minimum elsewhere. The 2026-10-28 sweep that set it, and the
+  // floor's decode-stall trade-off, are stated beside the contended target
+  // in Scheduler.cpp.
+  [[nodiscard]] static constexpr uint32_t
+  defaultContendedPrefillRows(uint32_t appleGpuFamily) noexcept {
+    return appleGpuFamily == 7 || appleGpuFamily == 8 ? kAppleSevenEightContendedPrefillRows
+                                                      : kMinimumContendedPrefillRows;
+  }
+
+  // The floor an engine runs with: `given` rows as configured, or with none
+  // given (zero) the default of Apple GPU family `appleGpuFamily`
+  // (defaultContendedPrefillRows).
+  [[nodiscard]] static constexpr uint32_t
+  resolveContendedPrefillRows(uint32_t given, uint32_t appleGpuFamily) noexcept {
+    return given ? given : defaultContendedPrefillRows(appleGpuFamily);
+  }
+
+  // A floor is a power of two in [64, ExecutionLimits::prefillTokenBudget],
+  // so halving from the full budget lands on it exactly.
+  [[nodiscard]] static bool
+  isValidContendedPrefillRows(uint32_t rows) noexcept;
+
   // Decode time owed for each unit of time a prefill runs while requests of
   // equal or higher priority decode; zero alternates one command of each kind.
   // A prefill command's attention computes at most maximumAttentionPairs
@@ -105,6 +136,10 @@ public:
   [[nodiscard]] static constexpr uint64_t attentionPairs(uint64_t position, uint32_t rows) noexcept {
     return rows * position + uint64_t{rows} * (rows + 1) / 2;
   }
+
+  // Sets the rows below which a contended prefill command never shrinks.
+  // Throws std::invalid_argument unless isValidContendedPrefillRows(rows).
+  void floorContendedPrefill(uint32_t rows);
 
   void submit(RequestSpec request);
   // Each Metal command buffer of an isolated prefill command stays within
@@ -270,6 +305,7 @@ private:
   // A prefill command's estimated cost: fixed, plus per row.
   double prefillFixedMilliseconds_ = 0.0;
   double prefillMillisecondsPerToken_ = 0.0;
+  uint32_t contendedPrefillRows_ = kMinimumContendedPrefillRows;
   double isolatedPrefillMilliseconds_ = kDefaultPrefillCommandMilliseconds;
   uint32_t isolatedPrefillBuffers_ = 1;
   uint32_t prefillTailAlignment_ = 0;

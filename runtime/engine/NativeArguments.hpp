@@ -67,6 +67,10 @@ struct NativeArguments final {
   // --prefill-bound-scope buffer|command: whether that bound holds each
   // command buffer or the whole command (EngineConfig::prefillBoundPerBuffer).
   bool prefillBoundPerBuffer = EngineConfig{}.prefillBoundPerBuffer;
+  // --contended-prefill-rows ROWS: the rows below which a contended prefill
+  // command never shrinks (EngineConfig::contendedPrefillRows). Zero for the
+  // GPU family's default (Scheduler::resolveContendedPrefillRows).
+  uint32_t contendedPrefillRows = 0;
   // --ple-memory BYTES|auto|off and --expert-memory BYTES|auto|off: a
   // Qwen3.8-Flash-Next GGUF's PLE table and a MoE target's routed experts,
   // through a store of BYTES that streams the rest from the SSD, as the

@@ -20,6 +20,11 @@ from .http_security import validate_api_key
 from .protocol import MAX_THINKING_END_TOKENS
 
 REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+# serve-native's contended prefill floor is a power of two in
+# [64, ExecutionLimits::prefillTokenBudget]; mirrored so a bad value fails
+# before the model loads.
+MIN_CONTENDED_PREFILL_ROWS = 64
+MAX_CONTENDED_PREFILL_ROWS = 2048
 # The targets' native window, the most context without --max-context, and
 # the most context --max-context takes, which YaRN stretches the native window
 # to and Qwen validates (QwenTargetDimensions::nativeContextTokens,
@@ -296,6 +301,20 @@ def parse_decode_share(value):
     if not math.isfinite(share) or share < 0:
         raise argparse.ArgumentTypeError("must be a nonnegative number such as 0.5")
     return share
+
+
+def parse_contended_prefill_rows(value):
+    try:
+        rows = int(value)
+    except ValueError:
+        rows = 0
+    is_in_range = MIN_CONTENDED_PREFILL_ROWS <= rows <= MAX_CONTENDED_PREFILL_ROWS
+    if not is_in_range or rows & (rows - 1):
+        raise argparse.ArgumentTypeError(
+            "must be a power of two in "
+            f"[{MIN_CONTENDED_PREFILL_ROWS}, {MAX_CONTENDED_PREFILL_ROWS}]"
+        )
+    return rows
 
 
 def parse_ane_ffn_share(value):
@@ -735,6 +754,20 @@ SERVE_OPTIONS = (
             metavar="SHARE",
             help="decode time owed per unit of prefill time while other requests "
             "decode (default: 0.5; 0 alternates one command each)",
+        ),
+    ),
+    ServeOption(
+        "--contended-prefill-rows",
+        "requests",
+        dict(
+            type=parse_contended_prefill_rows,
+            default=None,
+            metavar="N",
+            help="smallest prefill command, in rows, while other requests "
+            "decode; a power of two in "
+            f"[{MIN_CONTENDED_PREFILL_ROWS}, {MAX_CONTENDED_PREFILL_ROWS}] "
+            "(default: 256 on Apple GPU family 7/8 (M1/M2), "
+            f"{MIN_CONTENDED_PREFILL_ROWS} otherwise)",
         ),
     ),
     ServeOption(
