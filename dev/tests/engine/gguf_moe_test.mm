@@ -571,20 +571,29 @@ void checkGrouping(const MoeScratch &scratch, const MoePlan &plan, const std::st
   }
 }
 
-// A run's output rows and, per route, whether its expert tile ran the column tile (columnTile, on the staged expert
-// passes).
+// Whether tile t of a grouping ran the column tile on `tile`'s expert passes: on the staged passes every tile
+// moe_column_tile names, and on the MMA passes (Apple7/8, kernels/shared/moe_gguf_mma.metal) those of them whose
+// expert, routed or shared, has a Q2_0 projection, the one format they run there.
+bool columnTile(const MoeTileDescriptor *tiles, uint32_t t, MoeGgufTile tile, const Model &m) {
+  if (!moe_column_tile(tiles, t)) return false;
+  if (tile == MoeGgufTile::Staged) return true;
+  if (tile != MoeGgufTile::Mma) return false;
+  const auto first = m.formats.begin() + (tiles[t].expert == kExperts ? 3 : 0);
+  return std::any_of(first, first + 3, [](gguf_reference::Fmt f) { return f == gguf_reference::Q20; });
+}
+
+// A run's output rows and, per route, whether its expert tile ran the column tile (columnTile).
 struct MoeRun {
   std::vector<uint16_t> output;
   std::vector<bool> column;
 };
-std::vector<bool> columnRoutes(const MoeScratch &scratch, const MoePlan &plan) {
+std::vector<bool> columnRoutes(const MoeScratch &scratch, const MoePlan &plan, const Model &m) {
   const uint32_t routes = plan.rows() * kRoutes, tileRows = plan.tileRows();
   const auto *routeRows = static_cast<const uint32_t *>(scratch.routeRows.contents());
   const auto *tiles = static_cast<const MoeTileDescriptor *>(scratch.tileDescriptors.contents());
   std::vector<bool> column(routes);
-  if (plan.configuration().ggufTile == MoeGgufTile::Staged)
-    for (uint32_t route = 0; route < routes; ++route)
-      column[route] = moe_column_tile(tiles, routeRows[route] / tileRows);
+  for (uint32_t route = 0; route < routes; ++route)
+    column[route] = columnTile(tiles, routeRows[route] / tileRows, plan.configuration().ggufTile, m);
   return column;
 }
 // The first `rows` rows of two runs: rows whose routes ran the same tile kinds are bitwise equal, as a row's output
@@ -790,7 +799,7 @@ MoeRun runPlan(MetalBackend &backend, const Model &m, Buffers &b, const MoePlan 
                                                std::to_string(c) + " differs from the weighted expert sum");
     }
   }
-  MoeRun result{std::vector<uint16_t>(uint64_t{rows} * kHidden), columnRoutes(b.moe.scratch, plan)};
+  MoeRun result{std::vector<uint16_t>(uint64_t{rows} * kHidden), columnRoutes(b.moe.scratch, plan, m)};
   std::memcpy(result.output.data(), output, result.output.size() * 2);
   // Bitwise the output of the same dispatches again, whose grouping orders each expert's routes anew (its atomics),
   // and of every tile's threadgroups and two gate/up passes.
@@ -1150,8 +1159,8 @@ int verifiedRows(MetalBackend &backend) {
       const uint32_t row = route / kRoutes;
       return route % kRoutes < kTopK && row % SPLASH_TARGET_VERIFY_ROWS >= kVerify[row / SPLASH_TARGET_VERIFY_ROWS];
     };
-    // A run's output rows and, per route, its tile kind: column or not on the
-    // staged passes, UINT32_MAX where the run left it out.
+    // A run's output rows and, per route, its tile kind: column or not
+    // (columnTile), UINT32_MAX where the run left it out.
     const auto run = [&](const MetalBuffer &verifyRows) {
       allocate(backend, b, plan);
       std::memset(b.moe.output.contents(), 0, b.moe.output.sizeBytes());
@@ -1165,8 +1174,7 @@ int verifiedRows(MetalBackend &backend) {
       std::vector<uint32_t> kinds(uint64_t{rows} * kRoutes);
       for (uint32_t route = 0; route < kinds.size(); ++route)
         kinds[route] = routeRows[route] == UINT32_MAX ? UINT32_MAX
-                       : tile == MoeGgufTile::Staged ? uint32_t(moe_column_tile(tiles, routeRows[route] / tileRows))
-                                                     : 0;
+                                                     : uint32_t(columnTile(tiles, routeRows[route] / tileRows, tile, m));
       return std::pair{std::vector<uint16_t>(output, output + uint64_t{rows} * kHidden), kinds};
     };
     const auto [allOutput, allKinds] = run({});
