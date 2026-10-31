@@ -1238,6 +1238,73 @@ void testMeasuredBudgetUsesActualRowsAndRecovers() {
           "prefill budget did not adapt when measured execution became faster");
 }
 
+// A sample far over the contended slice halves a contended prefill command to
+// the floor: the minimum 64 rows, or a configured one.
+void testContendedFloorStopsHalving() {
+  require(Scheduler::kMinimumContendedPrefillRows == 64,
+          "the minimum contended floor changed");
+  for (const uint32_t floor : {Scheduler::kMinimumContendedPrefillRows, 256u}) {
+    engine::Scheduler scheduler(0.0);
+    if (floor != Scheduler::kMinimumContendedPrefillRows)
+      scheduler.floorContendedPrefill(floor);
+    scheduler.submit(request(1, 20'000));
+    scheduler.resourcesReady(1, 0);
+    completePrefill(scheduler, *scheduler.next({}), 1e9);
+    scheduler.submit(request(2, 1));
+    scheduler.resourcesReady(2, 1);
+    completeDecode(scheduler);
+    const BatchPlan plan = *scheduler.next({});
+    require(plan.kind == WorkKind::Prefill && plan.items[0].tokenCount == floor,
+            "a contended prefill command did not stop halving at its floor");
+  }
+}
+
+// Apple GPU families 7 and 8 (M1/M2) default to a 256-row floor, measured
+// there; every other family keeps the minimum.
+void testContendedFloorDefaultsPerFamily() {
+  for (const uint32_t family : {7u, 8u})
+    require(Scheduler::defaultContendedPrefillRows(family) == 256,
+            "Apple7/8 did not default to a 256-row contended floor");
+  for (const uint32_t family : {9u, 10u})
+    require(Scheduler::defaultContendedPrefillRows(family) == 64,
+            "a family past Apple8 did not keep the minimum contended floor");
+}
+
+// With no floor given (zero) the engine takes its family's default; a given
+// floor, the minimum included, runs as given on any family.
+void testContendedFloorResolvesGivenOrDefault() {
+  struct Case {
+    uint32_t given;
+    uint32_t family;
+    uint32_t expected;
+  };
+  for (const Case &item : {Case{0, 7, 256}, Case{0, 8, 256}, Case{0, 9, 64},
+                           Case{64, 8, 64}, Case{256, 9, 256}})
+    require(Scheduler::resolveContendedPrefillRows(item.given, item.family) ==
+                item.expected,
+            "a contended floor did not resolve to the given one or the family default");
+}
+
+// A floor is a power of two from the minimum matrix shape to the prefill
+// budget, so halving from the full budget lands on it exactly.
+void testInvalidContendedFloorsRejected() {
+  for (uint32_t rows : {0u, 1u, 32u, 63u, 96u, 100u, 192u, 4096u,
+                        std::numeric_limits<uint32_t>::max()}) {
+    require(!Scheduler::isValidContendedPrefillRows(rows),
+            "an invalid contended floor was reported valid");
+    engine::Scheduler scheduler(0.0);
+    rejects([&] { scheduler.floorContendedPrefill(rows); },
+            "contended prefill rows must be a power of two",
+            "an invalid contended floor was accepted");
+  }
+  for (uint32_t rows = 64; rows <= 2048; rows *= 2) {
+    require(Scheduler::isValidContendedPrefillRows(rows),
+            "a power-of-two floor in range was rejected");
+    engine::Scheduler scheduler(0.0);
+    scheduler.floorContendedPrefill(rows);
+  }
+}
+
 void testMeasuredBudgetPreservesPriority() {
   engine::Scheduler scheduler(0.0);
   scheduler.boundIsolatedPrefill(5000.0);
@@ -1721,6 +1788,10 @@ int main() {
   testFullPrefillModeKeepsWholeBudget();
     testAuxiliaryWorkDoesNotTrainTextPrefillTiming();
     testMeasuredBudgetUsesActualRowsAndRecovers();
+    testContendedFloorStopsHalving();
+    testContendedFloorDefaultsPerFamily();
+    testContendedFloorResolvesGivenOrDefault();
+    testInvalidContendedFloorsRejected();
     testMeasuredBudgetPreservesPriority();
     testUnavailableTimingAndMinimumBudget();
     testMeasuredBudgetDoesNotCountBlockedPeers();

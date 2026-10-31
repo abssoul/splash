@@ -160,7 +160,7 @@ void printUsage(std::string_view executable) {
       " [--relaunch-context TOKENS] [--ple-memory BYTES] [--expert-memory BYTES]"
       " [--verify-rows auto|all]"
       " [--prefill-mode bounded|full] [--prefill-bound-ms MILLISECONDS]"
-      " [--prefill-bound-scope buffer|command]");
+      " [--prefill-bound-scope buffer|command] [--contended-prefill-rows ROWS]");
   writeStderrLine("       " + command + " model-check mlx-affine none|safetensors CONFIG [DRAFT_CONFIG]");
   writeStderrLine("       " + command + " model-check gguf none|gguf CONFIG GGUF_METADATA [DRAFT_CONFIG]");
   writeStderrLine("       " + command + " device-check");
@@ -225,6 +225,7 @@ bootstrapConfig(const engine::NativeArguments &arguments) {
   config.nativeLoop.engine.decodeShare = arguments.decodeShare;
   config.nativeLoop.engine.prefillCommandMilliseconds = arguments.prefillCommandMilliseconds;
   config.nativeLoop.engine.prefillBoundPerBuffer = arguments.prefillBoundPerBuffer;
+  config.nativeLoop.engine.contendedPrefillRows = arguments.contendedPrefillRows;
   return config;
 }
 

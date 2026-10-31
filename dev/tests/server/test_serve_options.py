@@ -205,6 +205,11 @@ OPTIONS = {
         {"0": 0.0, "0.25": 0.25, "2": 2.0},
         ("-0.5", "inf", "nan", "half"),
     ),
+    "--contended-prefill-rows": values(
+        "--contended-prefill-rows",
+        {"64": 64, "256": 256, "2048": 2048},
+        ("0", "32", "63", "96", "4096", "bad"),
+    ),
     "--allowed-host": values(
         "--allowed-host", {"proxy.example": "proxy.example"}, (), repeatable=True
     ),
@@ -466,6 +471,12 @@ class ServeOptionsTests(unittest.TestCase):
 
         def native(parsed):
             return api._native_command(parsed, parsed.model_root)
+
+        # The engine resolves the contended floor's GPU-family default itself;
+        # a given floor reaches it as given.
+        self.assertNotIn("--contended-prefill-rows", native(args))
+        rows_args = api.parse_args([*required, "--contended-prefill-rows=128"])
+        self.assertEqual(native(rows_args)[-2:], ["--contended-prefill-rows", "128"])
 
         # Prefill commands stay within 2 s unless the mode or bound says
         # otherwise; the engine applies the default itself.

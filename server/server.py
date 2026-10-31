@@ -1719,6 +1719,8 @@ def _native_command(
         command.extend(("--ane-ffn-minimum-rows", str(args.ane_ffn_minimum_rows)))
     if args.verify_rows != "auto":
         command.extend(("--verify-rows", args.verify_rows))
+    if args.contended_prefill_rows is not None:
+        command.extend(("--contended-prefill-rows", str(args.contended_prefill_rows)))
     if args.decode_share is not None:
         command.extend(("--decode-share", str(args.decode_share)))
     if args.max_image_pixels != image_input.MAX_PIXELS:

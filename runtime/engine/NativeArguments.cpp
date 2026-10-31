@@ -200,6 +200,12 @@ NativeArguments parseNativeArguments(int argc, const char *const *argv) {
       if (value != "buffer" && value != "command")
         throw UsageError("--prefill-bound-scope requires buffer or command");
       result.prefillBoundPerBuffer = value == "buffer";
+    } else if (option == "--contended-prefill-rows") {
+      if (!parsePositive(value, result.contendedPrefillRows) ||
+          !Scheduler::isValidContendedPrefillRows(result.contendedPrefillRows))
+        throw UsageError("--contended-prefill-rows requires a power of two in [" +
+                         std::to_string(Scheduler::kMinimumContendedPrefillRows) + ", " +
+                         std::to_string(model::ExecutionLimits::prefillTokenBudget) + "]");
     } else if (option == "--verify-rows") {
       if (value != "auto" && value != "all")
         throw UsageError("--verify-rows requires auto or all");

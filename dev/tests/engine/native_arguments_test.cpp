@@ -254,6 +254,24 @@ void testVerifyRows() {
           "--verify-rows auto was not the engine's rule");
 }
 
+// --contended-prefill-rows reaches the engine's contended floor as given, the
+// minimum included; without it the floor is zero, which the bootstrap resolves
+// to the GPU family's default (Scheduler::resolveContendedPrefillRows).
+void testContendedPrefillRows() {
+  const ModelDirectory model;
+  require(parse(model, {"auto", "auto"}).contendedPrefillRows == 0,
+          "a missing --contended-prefill-rows did not leave the family default");
+  for (const uint32_t rows : {64u, 256u})
+    require(parse(model, {"auto", "auto", "--contended-prefill-rows", std::to_string(rows)})
+                    .contendedPrefillRows == rows,
+            "--contended-prefill-rows did not reach the arguments as given");
+  rejects([&] {
+    static_cast<void>(parse(model, {"auto", "auto", "--contended-prefill-rows", "32"}));
+  },
+          "--contended-prefill-rows requires a power of two in [64, 2048]",
+          "an out-of-range --contended-prefill-rows did not name the valid range");
+}
+
 // The stores' memory is the planner's unless set, which the server writes
 // only for off or a size; --kv-spill always, which only validation passes,
 // spills every request of a target that can.
@@ -295,6 +313,9 @@ void testRefusals() {
   refuses({"auto", "auto", "--idle-sleep", "never"},
           "--idle-sleep requires prevent or allow");
   refuses({"auto", "auto", "--ane", "gpu"}, "--ane requires on or off");
+  for (const char *rows : {"0", "32", "96", "rows", ""})
+    refuses({"auto", "auto", "--contended-prefill-rows", rows},
+            "--contended-prefill-rows requires a power of two in [64, ");
   for (const char *share : {"1", "-0.1", "nan", "inf", "half", ""})
     refuses({"auto", "auto", "--ane-ffn-share", share}, "--ane-ffn-share requires a share in [0, 1)");
   for (const char *rows : {"0", "-1", "1.5", "rows"})
@@ -398,6 +419,7 @@ int main(int argc, char **argv) {
     testServerCommandLines(argv[1]);
     testNeuralEngine();
     testVerifyRows();
+    testContendedPrefillRows();
     testStreamedMemoryAndSpill();
     testRefusals();
     std::cout << "native arguments tests passed\n";

@@ -86,6 +86,7 @@ Engine::Engine(EngineConfig config, Cache &cache, model::Model &model,
   scheduler_.boundIsolatedPrefill(config_.prefillCommandMilliseconds,
                                   config_.prefillBoundPerBuffer ? model_.prefillCommandBuffers() : 1);
   scheduler_.alignPrefillTails(model_.prefillTailAlignment(), model_.prefillAneMinimumRows());
+  scheduler_.floorContendedPrefill(config_.contendedPrefillRows);
 }
 
 void Engine::submit(EngineRequest value) {

@@ -794,6 +794,7 @@ def main_args(**overrides):
             "persistent_cache": False,
             "cache_dir": None,
             "decode_share": None,
+            "contended_prefill_rows": None,
             "disable_ane": False,
             "ane_ffn_share": None,
             "ane_ffn_minimum_rows": None,
