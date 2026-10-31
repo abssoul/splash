@@ -185,7 +185,7 @@ void ggufMoePlans() {
     // experts). The router's float tile follows Linear::ggufFloatTile and the
     // router's format (32 assumed cores: the neural accelerator from 321
     // rows of BF16 values, 449 of F32 values and 705 of a quantized format's
-    // rows, never on Apple9).
+    // rows, only on Apple10).
     for (const auto [routerFormat, first] :
          {std::pair{uint32_t{GGUF_FMT_BF16}, 321U}, std::pair{QuantizedSegment::kFloat32, 449U},
           std::pair{uint32_t{GGUF_FMT_AF8G64}, 705U}}) {
