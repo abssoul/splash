@@ -158,9 +158,22 @@ std::array<metal::MetalBuffer, 2> blockBindings(const AttentionBlocks &blocks, c
 }
 
 // Each query tile's history splits: the maximum shared out over the chunk's
-// tiles, at least one.
-uint32_t prefillSplits(uint32_t tiles) {
+// tiles, at least one. On Apple7/8 the register tile's pieces at long history
+// have too few tiles to fill the GPU, so their history splits until
+// tiles * splits * KV heads reaches about 32 threadgroups a core, but never past
+// the slots a full chunk's workspace holds.
+uint32_t prefillSplits(uint32_t tiles, uint32_t kvHeads, AttentionTile tile,
+                       uint32_t gpuCores) {
   constexpr uint32_t maximum = SPLASH_PREFILL_ATTENTION_MAXIMUM_SPLITS;
+  if (tile == AttentionTile::Register && gpuCores && kvHeads) {
+    constexpr uint32_t kTargetThreadgroupsPerCore = 32;
+    constexpr uint32_t kChunkSlots =
+        kv::prefillAttentionTiles(kv::kChunkedPrefillMaximumRows);
+    const uint32_t targetTilesSplits =
+        std::min(kChunkSlots,
+                 std::max(maximum, (kTargetThreadgroupsPerCore * gpuCores) / kvHeads));
+    return std::clamp(targetTilesSplits / tiles, 1U, maximum);
+  }
   return std::clamp(maximum / tiles, 1U, maximum);
 }
 
@@ -176,12 +189,13 @@ metal::DispatchSize splitThreads(AttentionTile tile, uint32_t queryHeads, kv::La
 } // namespace
 
 PrefillAttentionPlan PagedAttention::prefillPlan(
-    uint32_t rows, uint32_t queryHeads, kv::Layout layout, AttentionTile tile) {
+    uint32_t rows, uint32_t queryHeads, kv::Layout layout, AttentionTile tile,
+    uint32_t gpuCores) {
   const KernelLayout kernel = attentionKernelLayout(queryHeads, layout);
   if (!rows || rows > kv::kChunkedPrefillMaximumRows)
     throw std::invalid_argument("invalid attention workspace rows");
   const uint32_t tiles = kv::prefillAttentionTiles(rows);
-  const uint32_t splits = prefillSplits(tiles);
+  const uint32_t splits = prefillSplits(tiles, layout.kvHeads, tile, gpuCores);
   const uint32_t fusedRows =
       kv::kPrefillAttentionTileRows * (queryHeads / layout.kvHeads);
   const bool bf16 = layout.format == kv::Format::BFloat16;
@@ -268,7 +282,8 @@ VerifyAttentionPlan PagedAttention::verifyPlan(
 }
 
 AttentionWorkspace PagedAttention::prefillWorkspace(
-    uint32_t maximumRows, uint32_t queryHeads, kv::Layout layout) {
+    uint32_t maximumRows, uint32_t queryHeads, kv::Layout layout,
+    AttentionTile tile, uint32_t gpuCores) {
   (void)attentionKernelLayout(queryHeads, layout);
   if (!maximumRows || maximumRows > kv::kChunkedPrefillMaximumRows)
     throw std::invalid_argument("invalid attention workspace rows");
@@ -276,7 +291,7 @@ AttentionWorkspace PagedAttention::prefillWorkspace(
   // own exact plan in constant time; no bound scan occurs on the hot path.
   uint64_t slots = 0;
   for (uint32_t tiles = 1; tiles <= kv::prefillAttentionTiles(maximumRows); ++tiles)
-    slots = std::max(slots, uint64_t{tiles} * prefillSplits(tiles));
+    slots = std::max(slots, uint64_t{tiles} * prefillSplits(tiles, layout.kvHeads, tile, gpuCores));
   return attentionWorkspace(slots * kv::kPrefillAttentionTileRows * queryHeads,
                              layout.headDimension);
 }

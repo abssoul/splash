@@ -226,6 +226,37 @@ void unknownCoreCount() {
   }
 }
 
+void apple7PrefillAttentionPlans() {
+  for (uint32_t family : {7U, 8U}) {
+    for (uint32_t cores : {32U, 38U, 76U}) {
+      DeviceCapabilities dev = device(family);
+      dev.gpuCoreCount = cores;
+      const ExecutionPlans plans(dev);
+      for (uint32_t kvHeads : {2U, 4U}) {
+        const uint32_t queryHeads = kvHeads == 2 ? 16U : 24U;
+        const kv::Layout layout{1, kvHeads, 256};
+        require(plans.prefillAttention(2048, queryHeads, layout).splits == 1,
+                "2048-row piece takes 1 split");
+        require(plans.prefillAttention(512, queryHeads, layout).splits == 4,
+                "512-row piece scales splits with cores");
+        require(plans.prefillAttention(256, queryHeads, layout).splits == 8,
+                "256-row piece scales splits with cores");
+        require(plans.prefillAttention(128, queryHeads, layout).splits == 16,
+                "128-row piece scales splits with cores");
+
+        // The workspace bound equals the baseline bound (capped at 2048 rows)
+        const auto ws = plans.prefillAttentionWorkspace(2048, queryHeads, layout);
+        const auto baseWs = PagedAttention::prefillWorkspace(2048, queryHeads, layout);
+        require(ws.partialsBytes == baseWs.partialsBytes &&
+                    ws.statisticsBytes == baseWs.statisticsBytes,
+                "prefill attention workspace bound unchanged under cap");
+        for (uint32_t rows : {128U, 256U, 512U, 1024U, 2048U})
+          covers(ws, plans.prefillAttention(rows, queryHeads, layout).workspace, 1, attentionFields);
+      }
+    }
+  }
+}
+
 void workspaceBounds() {
   const ExecutionPlans plans(device());
   const std::array<uint32_t, 4> histories{31, 32, 2049, std::numeric_limits<uint32_t>::max()};
@@ -300,6 +331,7 @@ int main() {
     baselinePlans();
     ggufMoePlans();
     unknownCoreCount();
+    apple7PrefillAttentionPlans();
     workspaceBounds();
     invalidLookupsAndContextEdges();
     std::cout << "PASS execution plans: device policies, device MoE tiles, B1-B4 "

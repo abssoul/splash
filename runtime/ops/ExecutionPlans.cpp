@@ -25,11 +25,12 @@ void include(Workspace &bound, const Workspace &required,
 
 ExecutionPlans::ExecutionPlans(const DeviceCapabilities &device)
     : linear_(device), family_(gpuFamilyClass(device.appleGpuFamily)),
+      gpuCores_(plannedGpuCores(device)),
       attentionTile_(family_ == GpuFamilyClass::Apple7 ? AttentionTile::Register : AttentionTile::Mpp) {}
 
 PrefillAttentionPlan ExecutionPlans::prefillAttention(
     uint32_t rows, uint32_t queryHeads, kv::Layout layout) const {
-  return PagedAttention::prefillPlan(rows, queryHeads, layout, attentionTile_);
+  return PagedAttention::prefillPlan(rows, queryHeads, layout, attentionTile_, gpuCores_);
 }
 
 VerifyAttentionPlan ExecutionPlans::verifyAttention(
@@ -66,7 +67,7 @@ MoePlan ExecutionPlans::moeDecode(MoeShape shape, uint32_t lanes) const {
 
 AttentionWorkspace ExecutionPlans::prefillAttentionWorkspace(
     uint32_t maximumRows, uint32_t queryHeads, kv::Layout layout) const {
-  return PagedAttention::prefillWorkspace(maximumRows, queryHeads, layout);
+  return PagedAttention::prefillWorkspace(maximumRows, queryHeads, layout, attentionTile_, gpuCores_);
 }
 
 // The verify bound is linear in the lanes: one lane's is every width's share.
