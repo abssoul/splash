@@ -3,6 +3,8 @@
 // rate there. A tile runs the 8-, 16- or 32-row MMAs that hold its live rows.
 #pragma clang fp reassociate(off)
 #include "metal/kernels/common/gguf_mma_tile.h"
+#include "metal/kernels/common/gguf_column_tile.h"
+#include "metal/kernels/common/gguf_tile.h"
 #include "metal/kernels/common/moe_expert_slab.h"
 
 using namespace gguf_mma;
@@ -24,6 +26,22 @@ kernel void moe_expert_gguf_mma(device bfloat *input [[buffer(0)]], device const
   device bfloat *x = input + ulong(group.y) * Rows * p.input_size;
   const ulong out = ulong(group.y) * Rows * p.output_size;
   const uint origin = group.x * GGUF_TILE_COLUMNS + simd_group * kColumns, thread_index = simd_group * 32 + simd_lane;
+  // A tile of at most MOE_GGUF_COLUMN_ROWS live rows runs the column tile (kernels/common/gguf_column_tile.h), as
+  // moe_expert_gguf's does: a GEMV in registers without a stage or barrier, where the staged MMA tile's padded 8-row
+  // steps and their per-step stage barrier bound a one- or two-row tile, not DRAM. A decode tile of a sparse route
+  // (Qwen3.8-Flash-Next: ten of 512 experts a layer) is almost always such a tile. Q2_0 only: measured on M1 Max,
+  // the column tile halves these tiles' time on Q2_0 but runs ~11% slower than the staged MMA on IQ3_XXS, whose
+  // heavier weights and dequant outweigh the stage it skips; formats not measured stay on the staged MMA.
+  if (moe_column_tile(tiles, group.y) && s.format == FmtQ20::Id) {
+    float sums[MOE_GGUF_COLUMN_ROWS];
+    column_dot_any<MOE_GGUF_COLUMN_ROWS>(s.format, x, tile.rows, p.input_size, s.w0, s.w1, s.meta, origin + simd_lane,
+                                         0, p.input_size / 32, tl, thread_index, GGUF_STAGED_THREADS, sums);
+    for (uint row = 0; row < tile.rows; ++row) {
+      const ulong o = out + ulong(row) * p.output_size + origin + simd_lane;
+      output[o] = gguf_epilogue<Ep>(sums[row], aux, o);
+    }
+    return;
+  }
   const auto run = [&](auto fragments) {
     constexpr uint FM = decltype(fragments)::value;
     float2 acc[FN][FM];
