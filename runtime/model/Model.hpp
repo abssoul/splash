@@ -839,6 +839,11 @@ public:
   // commands hold a multiple of (Scheduler::alignPrefillTails); none by
   // default.
   [[nodiscard]] virtual uint32_t prefillTailAlignment() const noexcept { return 0; }
+  // The least rows of a prefill chunk the Neural Engine split takes
+  // (ops::AneFfn::minimumRows): a prompt's last command does not leave a
+  // tail when the untrimmed rows reach this minimum and the trimmed ones fall
+  // below it; none by default.
+  [[nodiscard]] virtual uint32_t prefillAneMinimumRows() const noexcept { return 0; }
   virtual void end(uint64_t requestId) = 0;
 };
 
