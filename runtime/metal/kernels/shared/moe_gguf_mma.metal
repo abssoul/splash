@@ -9,7 +9,7 @@
 
 using namespace gguf_mma;
 
-template <ushort Rows, GgufEpilogue Ep>
+template <ushort Rows, GgufEpilogue Ep, uint Shared>
 kernel void moe_expert_gguf_mma(device bfloat *input [[buffer(0)]], device const MoeTileDescriptor *tiles [[buffer(1)]],
                                 device const uint *tile_count [[buffer(2)]], device uchar *w0 [[buffer(3)]],
                                 device uchar *w1 [[buffer(4)]], device uchar *meta [[buffer(5)]], device uchar *sw0 [[buffer(6)]],
@@ -22,7 +22,7 @@ kernel void moe_expert_gguf_mma(device bfloat *input [[buffer(0)]], device const
   threadgroup half2 tl[kQuantPairTableEntries];
   if (group.y >= *tile_count) return;
   const MoeTileDescriptor tile = tiles[group.y];
-  const MoeGgufSegment s = moe_gguf_segment<1>(tile.expert, p, slots, w0, w1, meta, sw0, sw1, smeta);
+  const MoeGgufSegment s = moe_gguf_segment<Shared>(tile.expert, p, slots, w0, w1, meta, sw0, sw1, smeta);
   device bfloat *x = input + ulong(group.y) * Rows * p.input_size;
   const ulong out = ulong(group.y) * Rows * p.output_size;
   const uint origin = group.x * GGUF_TILE_COLUMNS + simd_group * kColumns, thread_index = simd_group * 32 + simd_lane;
@@ -63,7 +63,12 @@ using MoeExpertGgufMmaKernel = void(device bfloat *, device const MoeTileDescrip
                                     device uchar *, device uchar *, device uchar *, device uchar *, device uchar *,
                                     device bfloat *, device bfloat *, device const uint *, constant MoeGgufExpertParams &,
                                     uint2, uint, uint);
-template [[host_name("moe_expert_gguf_mma_m8_a")]] kernel MoeExpertGgufMmaKernel moe_expert_gguf_mma<8, EpNone>;
-template [[host_name("moe_expert_gguf_mma_m8_g")]] kernel MoeExpertGgufMmaKernel moe_expert_gguf_mma<8, EpUpWithGate>;
-template [[host_name("moe_expert_gguf_mma_m32_a")]] kernel MoeExpertGgufMmaKernel moe_expert_gguf_mma<32, EpNone>;
-template [[host_name("moe_expert_gguf_mma_m32_g")]] kernel MoeExpertGgufMmaKernel moe_expert_gguf_mma<32, EpUpWithGate>;
+template [[host_name("moe_expert_gguf_mma_m8_a")]] kernel MoeExpertGgufMmaKernel moe_expert_gguf_mma<8, EpNone, 1>;
+template [[host_name("moe_expert_gguf_mma_m8_g")]] kernel MoeExpertGgufMmaKernel moe_expert_gguf_mma<8, EpUpWithGate, 1>;
+template [[host_name("moe_expert_gguf_mma_m32_a")]] kernel MoeExpertGgufMmaKernel moe_expert_gguf_mma<32, EpNone, 1>;
+template [[host_name("moe_expert_gguf_mma_m32_g")]] kernel MoeExpertGgufMmaKernel moe_expert_gguf_mma<32, EpUpWithGate, 1>;
+// Flint's shared expert of two slices (CompiledMoeRouting "_s2").
+template [[host_name("moe_expert_gguf_mma_m8_a_s2")]] kernel MoeExpertGgufMmaKernel moe_expert_gguf_mma<8, EpNone, 2>;
+template [[host_name("moe_expert_gguf_mma_m8_g_s2")]] kernel MoeExpertGgufMmaKernel moe_expert_gguf_mma<8, EpUpWithGate, 2>;
+template [[host_name("moe_expert_gguf_mma_m32_a_s2")]] kernel MoeExpertGgufMmaKernel moe_expert_gguf_mma<32, EpNone, 2>;
+template [[host_name("moe_expert_gguf_mma_m32_g_s2")]] kernel MoeExpertGgufMmaKernel moe_expert_gguf_mma<32, EpUpWithGate, 2>;
