@@ -579,8 +579,9 @@ EMBEDDING_TYPES = FORMAT_TYPES
 # for each (runtime/model/GgufImage.cpp): projections of a format; the tensors
 # GGUFs keep unquantized, which run unrounded: small GDN vectors of F32,
 # norms (and Qwen3.8-Flash-Next's PLE convolution) of F32 or the BF16 and F16
-# that widen to it (floatNorm), float projections (MoE routers, the QSA
-# indexer) of F32 or BF16, which run as stored (floatTensor), and
+# that widen to it (floatNorm), float projections (the QSA indexer) of F32 or
+# BF16, which run as stored (floatTensor), MoE routers of those or of a
+# quantized type, whose native rows run as stored too (router), and
 # shared-expert scalar gates of F32, BF16 or Q8_0, which preparation turns
 # into the F32 values they hold (floatRows); GDN alpha and beta, each of a
 # format or F32, which preparation widens to the F32 values they hold unless
@@ -589,6 +590,7 @@ EMBEDDING_TYPES = FORMAT_TYPES
 F32 = {"F32"}
 NORM_TYPES = {"F32", "BF16", "F16"}
 FLOAT_PROJECTION_TYPES = {"F32", "BF16"}
+ROUTER_TYPES = FLOAT_PROJECTION_TYPES | QUANTIZED_TYPES
 FLOAT_ROW_TYPES = {"F32", "BF16", "Q8_0"}
 MODEL_TENSORS = {
     "token_embd.weight": EMBEDDING_TYPES,
@@ -624,7 +626,7 @@ DENSE_TENSORS = {
     "ffn_down.weight": FORMAT_TYPES,
 }
 MOE_TENSORS = {
-    "ffn_gate_inp.weight": FLOAT_PROJECTION_TYPES,
+    "ffn_gate_inp.weight": ROUTER_TYPES,
     "ffn_gate_exps.weight": FORMAT_TYPES,
     "ffn_up_exps.weight": FORMAT_TYPES,
     "ffn_down_exps.weight": FORMAT_TYPES,
